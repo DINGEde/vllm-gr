@@ -235,3 +235,21 @@ vllm_gr/_version.py
 # AI coding assistants
 .claude/
 .codex/
+
+# ===== 个人学习资料与团队同步工具（勿提交到 fork）=====
+# CUDA Graph 学习笔记与实验
+CUDA Graph 学习.md
+cuda_graph_学习/
+cuda_graph_experiments.ipynb
+cuda_graph_experiments.py
+build_notebook.py
+
+# 团队 RFC 参考资料与同步工具
+团队RFC/
+团队PR/
+团队活动/
+rfc_list.json
+download_rfcs.py
+download_prs.py
+sync_team_activity.py
+run_sync.bat
