@@ -257,6 +257,15 @@ def _step_engine_and_collect_outputs(
     active_indices = [j for j, instance in enumerate(instances_batch) if len(instance.beams) > 0]
     step_outputs_accumulated = []
     while active_indices:
+        # The previous token step flatten/materialize allocates a burst of
+        # short-lived objects (128 per-beam caches + full-prompt token copies)
+        # that pushes gen0 past its threshold and fires a cyclic-GC collection
+        # inside the CPU postprocess on the critical path (~4.6ms of the 5.1ms
+        # decision_flatten bucket at beam_width=128).  Collect gen0/gen1 here,
+        # before blocking on the engine step, so the collection overlaps the
+        # engine-driven-chained GPU forward instead of landing in
+        # flatten/materialize.
+        gc.collect(1)
         step_outputs = llm_engine.step()
         step_outputs_accumulated.extend(step_outputs)
 
