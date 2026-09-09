@@ -208,6 +208,7 @@ def complete_eos_candidates(
     initial_logprobs: FlatLogprobs,
     include_eos_token: bool,
     inherit_lora_request: bool,
+    share_prompt_prefix: bool = False,
 ) -> tuple[list[BeamSearchSequence], np.ndarray]:
     """Materialize stop-token candidates and mask their scores on a copy."""
 
@@ -230,6 +231,8 @@ def complete_eos_candidates(
         )
         eos_beam._lp_parent = parent
         eos_beam._lp_step_data = cached
+        if share_prompt_prefix:
+            eos_beam._prompt_token_ids = parent._prompt_token_ids
         eos_beams.append(eos_beam)
 
     masked_scores = scores.copy()
@@ -283,6 +286,7 @@ def materialize_selected_beams(
     beam_idx: np.ndarray,
     beam_flat_cache: Sequence[BeamCandidateCache | None],
     initial_logprobs: FlatLogprobs,
+    share_prompt_prefix: bool = False,
 ) -> tuple[list[BeamSearchSequence], ForkInfo]:
     """Build selected child beams and their grouped-request fork mapping."""
 
@@ -303,6 +307,8 @@ def materialize_selected_beams(
         )
         new_beam._lp_parent = parent
         new_beam._lp_step_data = cached
+        if share_prompt_prefix:
+            new_beam._prompt_token_ids = parent._prompt_token_ids
         new_beams.append(new_beam)
         fork_info.append((parent_index, token_id))
 

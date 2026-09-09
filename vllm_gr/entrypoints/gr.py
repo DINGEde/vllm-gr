@@ -17,6 +17,7 @@ LLM path.
 
 import gc
 import time
+from dataclasses import replace
 from typing import TYPE_CHECKING, Any, Union, cast
 
 import numpy as np
@@ -78,9 +79,22 @@ logger = init_logger(__name__)
 ForkInfo = list[tuple[int, int]]
 
 
+def _beam_full_tokens(beam: "BeamSearchSequence") -> list[int]:
+    """Return the beam's full token sequence.
+
+    In shared-prefix mode the full prompt lives in the read-only
+    ``_prompt_token_ids`` field and ``tokens`` holds only the generated tail;
+    in the legacy path ``tokens`` is already the full sequence.
+    """
+    prompt = getattr(beam, "_prompt_token_ids", None)
+    return prompt + beam.tokens if prompt is not None else beam.tokens
+
+
 def _create_tokens_prompt_from_beam(beam: "BeamSearchSequence") -> "TokensPrompt":
     """Create a TokensPrompt payload from a BeamSearchSequence."""
-    return beam.get_prompt()
+    # get_prompt() expects the full sequence, so hand it a temporary view with
+    # the shared prompt prefix prepended when in shared-prefix mode.
+    return replace(beam, tokens=_beam_full_tokens(beam)).get_prompt()
 
 
 def _beam_request_cleanup(llm_engine, session_id: str, final_ids: list[str]) -> None:
@@ -150,9 +164,9 @@ def _prepare_beam_step_requests(
                 parent_beam_ids.append(parent_id)
                 child_beam_ids.append(child_id)
 
-                full_tokens = instance.beams[new_idx].tokens
                 prefix_len = instance_prefix_len[j]
-                beam_tokens.append(full_tokens[prefix_len:])
+                # `tokens` is the generated tail under shared-prefix mode.
+                beam_tokens.append(instance.beams[new_idx].tokens)
 
             # One grouped-beam execution is one logical upstream request.
             # Beam width travels separately in BeamRequestStepUpdate.
@@ -165,7 +179,7 @@ def _prepare_beam_step_requests(
             # Register beam output
             ec_req = EngineCoreRequest(
                 request_id=session_id,
-                prompt_token_ids=instance.beams[0].tokens,
+                prompt_token_ids=instance.beams[0]._prompt_token_ids + instance.beams[0].tokens,
                 mm_features=None,
                 sampling_params=decode_sampling_params,
                 pooling_params=None,
@@ -234,7 +248,7 @@ def _prepare_beam_step_requests(
         else:
             # ADD_BATCH path (step 0)
             request_id_batch = f"offline-beam-{prompt_start + j}"
-            instance_prefix_len[j] = len(instance.beams[0].tokens)
+            instance_prefix_len[j] = len(instance.beams[0]._prompt_token_ids)
 
             request_id_item = f"{request_id_batch}-0"
             tokens_prompt = _create_tokens_prompt_from_beam(instance.beams[0])
@@ -362,7 +376,7 @@ def _parse_step_logprobs(
                 )
             valid_token_ids = None
             if coordinator.enabled and not is_constrained:
-                generated_tokens = current_beam.tokens[instance.prompt_len :]
+                generated_tokens = _beam_full_tokens(current_beam)[instance.prompt_len :]
                 valid_token_ids = coordinator.valid_next_token_ids(generated_tokens)
 
             coordinator.add_parent_candidates(
@@ -388,7 +402,7 @@ def _parse_step_logprobs(
         valid_token_ids = None
         if coordinator.enabled and not is_constrained:
             current_beam = instance.beams[0]
-            generated_tokens = current_beam.tokens[instance.prompt_len :]
+            generated_tokens = _beam_full_tokens(current_beam)[instance.prompt_len :]
             valid_token_ids = coordinator.valid_next_token_ids(generated_tokens)
 
         coordinator.add_parent_candidates(
@@ -605,6 +619,7 @@ def _custom_beam_search_batch(
                     initial_logprobs=initial_logprobs,
                     include_eos_token=True,
                     inherit_lora_request=True,
+                    share_prompt_prefix=True,
                 )
                 instance.completed.extend(eos_beams)
 
@@ -628,6 +643,7 @@ def _custom_beam_search_batch(
                 beam_idx=all_beams_beam_idx_arr,
                 beam_flat_cache=beam_flat_cache,
                 initial_logprobs=initial_logprobs,
+                share_prompt_prefix=True,
             )
             instance.beams = new_beams
             instance_fork_info[j] = fork_info
@@ -995,6 +1011,12 @@ class GRLLM(LLM):
             # dynamic attrs will break — upstream the fields if that happens.
             instance.beams[0]._lp_parent = None
             instance.beams[0]._lp_step_data = None
+            # Shared-prefix representation: keep the full prompt in a read-only
+            # _prompt_token_ids (shared by every descendant beam) and reset
+            # `tokens` to the generated tail, so materialize only copies the
+            # incremental tokens instead of the whole prompt each step.
+            instance.beams[0]._prompt_token_ids = instance.beams[0].tokens
+            instance.beams[0].tokens = []
             instance.prompt_len = (
                 len(prompt_tokens) - 1 if sid_begin_token_id is not None else len(prompt_tokens)
             )
@@ -1007,7 +1029,7 @@ class GRLLM(LLM):
         # only ever consumed when concatenating beam.text at the very end.
         cached_prompts = []
         for instance in instances:
-            prompt_tokens = instance.beams[0].tokens
+            prompt_tokens = instance.beams[0]._prompt_token_ids
             # SID-begin seeds the engine prompt but belongs to generated output.
             cached_prompts.append({"tokens": prompt_tokens, "len": instance.prompt_len})
 
@@ -1127,7 +1149,7 @@ class GRLLM(LLM):
                         for instance in instances_batch:
                             prompt_len = instance.prompt_len
                             for beam in instance.beams:
-                                generated_tokens = beam.tokens[prompt_len:]
+                                generated_tokens = _beam_full_tokens(beam)[prompt_len:]
                                 valid_token_ids = self.constraint_coordinator.valid_next_token_ids(
                                     generated_tokens
                                 )
@@ -1188,6 +1210,7 @@ class GRLLM(LLM):
                                 initial_logprobs=initial_logprobs,
                                 include_eos_token=True,
                                 inherit_lora_request=True,
+                                share_prompt_prefix=True,
                             )
                             instance.completed.extend(eos_beams)
 
@@ -1206,6 +1229,7 @@ class GRLLM(LLM):
                             beam_idx=all_beams_beam_idx_arr,
                             beam_flat_cache=beam_flat_cache,
                             initial_logprobs=initial_logprobs,
+                            share_prompt_prefix=True,
                         )
                         instance.beams = new_beams
 
@@ -1260,7 +1284,12 @@ class GRLLM(LLM):
             # Qwen2Tokenizer.batch_decode accepts a list of token-id lists and
             # returns list[str], equivalent to N individual decode() calls but
             # ~5x faster (Rust batch path vs per-call Python wrapper overhead).
-            beam_token_lists = [beam.tokens[prompt_len:] for beam in best_beams]
+            # Slice the generated tail from the full sequence: on the shared-
+            # prefix path ``beam.tokens`` holds only the generated tail, but a
+            # sid_begin token (when present) lives in ``_prompt_token_ids`` at
+            # ``prompt_len`` — it belongs to the generated output, so decode it
+            # here rather than losing it between prompt_text and gen_text.
+            beam_token_lists = [_beam_full_tokens(beam)[prompt_len:] for beam in best_beams]
             if hasattr(tokenizer, "batch_decode"):
                 decoded_gen_texts = cast(PreTrainedTokenizerBase, tokenizer).batch_decode(
                     beam_token_lists
@@ -1269,6 +1298,14 @@ class GRLLM(LLM):
                 decoded_gen_texts = [tokenizer.decode(tokens) for tokens in beam_token_lists]
             for beam, gen_text in zip(best_beams, decoded_gen_texts):
                 beam.text = prompt_text + gen_text
+            # Restore the full token sequence on the returned beams.  During
+            # decoding the shared-prefix path keeps only the generated tail in
+            # ``tokens`` (the prompt lives in the read-only
+            # ``_prompt_token_ids``), so callers expect ``sequence.tokens`` to
+            # be the complete prompt + generated tail.  dataclasses.replace
+            # also drops the dynamic ``_prompt_token_ids`` attribute, so the
+            # returned beams expose no internal state.
+            best_beams = [replace(beam, tokens=_beam_full_tokens(beam)) for beam in best_beams]
             outputs.append(BeamSearchOutput(sequences=best_beams))
 
         return outputs
