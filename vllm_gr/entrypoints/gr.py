@@ -1305,7 +1305,22 @@ class GRLLM(LLM):
             # be the complete prompt + generated tail.  dataclasses.replace
             # also drops the dynamic ``_prompt_token_ids`` attribute, so the
             # returned beams expose no internal state.
+            # EXPERIMENT (method 2A + 1): sever the dead parent chain and force
+            # a GC pass at the request boundary.  After reconstruct_beam_logprobs
+            # the _lp_parent/_lp_step_data pointers are dead; clearing them makes
+            # every intermediate beam + candidate cache garbage immediately,
+            # instead of letting them age into gen2 and blow up the next full
+            # collection (a sporadic decode p99 spike).  The explicit gc.collect()
+            # then flattens that gen2 scan onto this request boundary.
+            for beam in best_beams:
+                node = beam
+                while node is not None:
+                    parent = getattr(node, "_lp_parent", None)
+                    node._lp_parent = None
+                    node._lp_step_data = None
+                    node = parent
             best_beams = [replace(beam, tokens=_beam_full_tokens(beam)) for beam in best_beams]
+            gc.collect()
             outputs.append(BeamSearchOutput(sequences=best_beams))
 
         return outputs
