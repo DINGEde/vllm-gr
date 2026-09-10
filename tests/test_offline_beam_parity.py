@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -11,7 +12,7 @@ from vllm.logprobs import FlatLogprobs
 
 from vllm_gr.constraints import BeamConstraintCoordinator
 from vllm_gr.constraints.strategies import TrieConstraintStrategy
-from vllm_gr.entrypoints.gr import _parse_step_logprobs
+from vllm_gr.entrypoints.gr import _beam_full_tokens, _parse_step_logprobs
 from vllm_gr.utils.catalog import Catalog
 
 
@@ -104,3 +105,29 @@ def test_offline_candidates_use_shared_trie_filter_contract(
     assert scores == pytest.approx([-0.5 + logprob for logprob in expected_logprobs])
     assert beam_idx == [0, 0]
     assert list(cache[0][0]) == expected_token_ids
+
+
+def test_beam_full_tokens_shared_prefix_restores_complete_sequence() -> None:
+    # Shared-prefix path: beam carries a read-only _prompt_token_ids and
+    # ``tokens`` holds only the generated tail.
+    beam = _beam([1, 2, 3])
+    beam._prompt_token_ids = [10, 20, 30]
+    beam.tokens = [4, 5]
+
+    restored = replace(beam, tokens=_beam_full_tokens(beam))
+
+    assert restored.tokens == [10, 20, 30, 4, 5]
+    # dataclasses.replace rebuilds only the declared fields, so the dynamic
+    # _prompt_token_ids attribute is dropped and never leaks to callers.
+    assert not hasattr(restored, "_prompt_token_ids")
+
+
+def test_beam_full_tokens_legacy_no_prompt_attr_keeps_tokens() -> None:
+    # Legacy path: without _prompt_token_ids, tokens is already the full
+    # sequence and must be returned unchanged.
+    beam = _beam([1, 2, 3])
+
+    restored = replace(beam, tokens=_beam_full_tokens(beam))
+
+    assert restored.tokens == [1, 2, 3]
+    assert not hasattr(restored, "_prompt_token_ids")

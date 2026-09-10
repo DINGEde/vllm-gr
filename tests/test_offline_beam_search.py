@@ -81,6 +81,18 @@ def _run_offline_beam_search(
             outputs = llm.beam_search(prompts, params)
             assert len(outputs) == len(prompts)
             assert len(outputs[0].sequences) == beam_width
+            # Regression (PR #345 review): during decode the shared-prefix path
+            # keeps only the generated tail in beam.tokens, but it must be
+            # restored to the full sequence (prompt + generated tail) before
+            # returning. If regressed, tokens length would be <= max_tokens;
+            # the full sequence is prompt_len + generated tokens, far longer.
+            for seq in outputs[0].sequences:
+                assert len(seq.tokens) > max_tokens, (
+                    "beam_search returned beams without the full prompt prefix"
+                )
+                assert not hasattr(seq, "_prompt_token_ids"), (
+                    "internal _prompt_token_ids must not leak to callers"
+                )
         end = time.perf_counter()
     print(f"Elapsed mean: {(end - start) / max(1, loops):.4f}s")
 
