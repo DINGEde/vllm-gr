@@ -13,6 +13,7 @@ from vllm_gr.utils.npu_adapter import is_cuda_available
 from vllm_gr.v1.worker.prefill_graph_common import (
     ENV_ENABLE_PREFILL_GRAPH,
     BasePrefillGraphRunner,
+    get_kv_capture_bound,
     is_prefill_graph_enabled,
 )
 
@@ -144,9 +145,25 @@ class GPUPrefillGraphRunner(BasePrefillGraphRunner):
                     # The captured flash-attention call bakes max_seqlen_k from
                     # this metadata scalar; the replay then admits requests
                     # whose KV length (num_computed + scheduled) fits within
-                    # 2x the bucket. Requests beyond that bound fall back to
-                    # eager (checked in execute_model_prefill).
-                    bound = 2 * bucket
+                    # this bound. Requests beyond it fall back to eager
+                    # (checked in execute_model_prefill).
+                    #
+                    # The default couples the bound to the bucket (2x), which
+                    # only holds when a batch schedules roughly its own KV
+                    # length. A prefix-cache hit schedules just the uncached
+                    # tail, so it matches the smallest bucket while its KV
+                    # length is the full context -- every hit replay is then
+                    # rejected. get_kv_capture_bound widens the bound without
+                    # touching buckets that already cover their contexts, so
+                    # miss-path graphs stay byte-identical to the default.
+                    bound = self._kv_capture_bound(bucket)
+                    if bound < bucket:
+                        logger.warning(
+                            "Prefill graph KV bound %d is below bucket %d; replays "
+                            "for this bucket can never cover their own query extent.",
+                            bound,
+                            bucket,
+                        )
                     self._apply_max_seq_len_bound(attn_metadata, bound)
                     buf.max_seq_len_bounds[num_reqs] = bound
 
@@ -252,6 +269,23 @@ class GPUPrefillGraphRunner(BasePrefillGraphRunner):
         """Returns True if a Graph has been captured for this bucket and num_reqs."""
         buf = self.buffers.get(bucket)
         return buf is not None and buf.has_captured_graph(num_reqs)
+
+    @staticmethod
+    def _kv_capture_bound(bucket: int) -> int:
+        """KV bound baked into this bucket's graph.
+
+        The returned value feeds both the captured attention scalar
+        (``_apply_max_seq_len_bound`` -> flash-attention ``max_seqlen_k``) and
+        the recorded replay gate (``buf.max_seq_len_bounds``), so the two can
+        never disagree. The override only ever widens it: buckets whose
+        ``2 * bucket`` already covers their contexts keep the default, which
+        is what keeps miss-path graphs byte-identical.
+        """
+        bound = 2 * bucket
+        kv_bound = get_kv_capture_bound()
+        if kv_bound is not None and kv_bound > bound:
+            bound = kv_bound
+        return bound
 
     @staticmethod
     def _apply_max_seq_len_bound(attn_metadata: Any, bound: int) -> None:
