@@ -43,11 +43,72 @@ def test_match_bucket_standard() -> None:
 def test_match_bucket_dense_default_range() -> None:
     graph_runner = BeamPrefillGraphRunner(MockModelRunner())
 
+    # Without the bound override the grid is the plain step range: every total
+    # maps to the same bucket it did before the small buckets existed, so a
+    # 128-token or 17-token cache hit still replays in the graph it used to.
     assert graph_runner.match_bucket(1) == 128
+    assert graph_runner.match_bucket(16) == 128
+    assert graph_runner.match_bucket(17) == 128
     assert graph_runner.match_bucket(128) == 128
     assert graph_runner.match_bucket(129) == 256
     assert graph_runner.match_bucket(8192) == 8192
     assert graph_runner.match_bucket(8193) is None
+
+
+def test_match_bucket_small_buckets_opt_in(monkeypatch: pytest.MonkeyPatch) -> None:
+    from vllm_gr.v1.worker.prefill_graph_common import ENV_PREFILL_GRAPH_KV_BOUND
+
+    monkeypatch.setenv(ENV_PREFILL_GRAPH_KV_BOUND, "1024")
+    graph_runner = BeamPrefillGraphRunner(MockModelRunner())
+
+    # With the override set, an exact small bucket serves the cache-hit tails:
+    # tail 1 (a separate gemv shape) gets bucket 1, tails 2..16 get bucket 16,
+    # and everything above keeps the step range.
+    assert graph_runner.match_bucket(1) == 1
+    assert graph_runner.match_bucket(16) == 16
+    assert graph_runner.match_bucket(17) == 128
+    assert graph_runner.match_bucket(128) == 128
+    assert graph_runner.match_bucket(129) == 256
+
+
+def test_small_buckets_never_shrink_replay_coverage(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Under one environment the opt-in grid admits at least the KV extent the
+    step grid admits for the same scheduled total.
+
+    A cache hit lands in the smallest bucket by scheduled tail while its KV
+    length is the whole context, so moving such a step into a *smaller* bucket
+    is only safe if the bound baked for that bucket is at least as wide as the
+    bound the step grid baked for the same request. That is the regression the
+    small buckets introduced when they were added to the default grid.
+    """
+    from vllm_gr.v1.worker.gpu_prefill_graph_runner import GPUPrefillGraphRunner
+    from vllm_gr.v1.worker.prefill_graph_common import (
+        ENV_PREFILL_GRAPH_KV_BOUND,
+        SMALL_PREFILL_BUCKETS,
+    )
+
+    # The grid the env leaves untouched, captured with the env unset.
+    monkeypatch.delenv(ENV_PREFILL_GRAPH_KV_BOUND, raising=False)
+    default_buckets = list(BeamPrefillGraphRunner(MockModelRunner()).buckets)
+
+    # The opt-in grid under the bound the feature requires, compared against
+    # the default grid under the *same* environment.
+    monkeypatch.setenv(ENV_PREFILL_GRAPH_KV_BOUND, "1024")
+    opt_in_runner = BeamPrefillGraphRunner(MockModelRunner())
+    assert set(opt_in_runner.buckets) - set(default_buckets) == set(SMALL_PREFILL_BUCKETS)
+    assert set(default_buckets) - set(opt_in_runner.buckets) == set()
+
+    def coverage(bucket: int | None) -> int:
+        """KV extent a step landing in ``bucket`` is admitted for."""
+        if bucket is None:
+            return 0
+        return int(GPUPrefillGraphRunner._kv_capture_bound(bucket))
+
+    for total in range(1, max(default_buckets) + 1):
+        step_bucket = next((b for b in default_buckets if b >= total), None)
+        assert coverage(opt_in_runner.match_bucket(total)) >= coverage(step_bucket)
 
 
 def test_get_prefill_logit_indices() -> None:
@@ -282,6 +343,42 @@ class MockNPUAttnBuilder:
         self.npu_causal_atten_mask = None
 
 
+@pytest.mark.parametrize(  # type: ignore[misc]
+    ("bucket", "expected_reqs", "expected_lens", "expected_cols"),
+    [
+        # Small buckets: fewer tokens than the dummy width must not produce
+        # zero-length requests, and the block table must still cover seq_len.
+        (1, 1, [1], 1),
+        (4, 4, [1, 1, 1, 1], 1),
+        (16, 8, [2] * 8, 1),
+        (128, 8, [16] * 8, 1),
+        # Uneven split across a block boundary: the longest request needs an
+        # extra block-table column even though base_len fits in one.
+        (129, 8, [17] + [16] * 7, 2),
+    ],
+)
+def test_npu_dummy_metadata_per_bucket(
+    bucket: int, expected_reqs: int, expected_lens: list[int], expected_cols: int
+) -> None:
+    from vllm_gr.v1.worker.npu_prefill_graph_runner import NPUPrefillGraphRunner
+
+    npu_runner = NPUPrefillGraphRunner(MockModelRunner(), buckets=[bucket])
+    builder = MockNPUAttnBuilder()
+    meta = npu_runner._build_dummy_metadata(bucket, builder, npu_runner.buffers[bucket])
+
+    assert meta.num_reqs == expected_reqs
+    assert meta.seq_lens_cpu == expected_lens
+    assert meta.num_actual_tokens == bucket
+    assert meta.query_start_loc_cpu[0] == 0
+    assert meta.query_start_loc_cpu[-1] == bucket
+    # Structural FIA input contract, checked for every bucket in the grid.
+    assert all(length > 0 for length in meta.seq_lens_cpu)
+    assert sum(meta.seq_lens_cpu) == bucket
+    assert meta.block_table.shape[0] == meta.num_reqs
+    assert meta.block_table.shape[1] == expected_cols
+    assert meta.block_table.shape[1] * builder.block_size >= max(meta.seq_lens_cpu)
+
+
 def test_build_update_lists_pad_absorption() -> None:
     from vllm_gr.v1.worker.npu_prefill_graph_runner import build_update_lists
 
@@ -458,6 +555,7 @@ def test_platform_bucket_config(
     from vllm_gr.v1.worker.prefill_graph_runner import (
         DEFAULT_PREFILL_BUCKETS,
         ENV_PREFILL_GRAPH_BUCKET_STEP,
+        ENV_PREFILL_GRAPH_KV_BOUND,
         ENV_PREFILL_GRAPH_MAX_BUCKET,
         NPU_DEFAULT_PREFILL_BUCKETS,
         PREFILL_GRAPH_BUCKET_STEP_DEFAULT,
@@ -465,7 +563,9 @@ def test_platform_bucket_config(
         get_default_buckets,
     )
 
-    # Both platforms use the configured dense bucket geometry.
+    # Both platforms use the configured dense bucket geometry. The exact small
+    # buckets are opt-in via the KV-bound override, so with the environment
+    # untouched the grid is the plain step range.
     expected_default_buckets = list(
         range(
             PREFILL_GRAPH_BUCKET_STEP_DEFAULT,
@@ -480,9 +580,24 @@ def test_platform_bucket_config(
     assert get_default_buckets() == NPU_DEFAULT_PREFILL_BUCKETS
     assert get_default_buckets() == expected_default_buckets
 
+    # Opting in adds the small buckets on either platform.
+    monkeypatch.setenv(ENV_PREFILL_GRAPH_KV_BOUND, "1024")
+    assert get_default_buckets() == sorted(
+        set(expected_default_buckets) | set(prefill_graph_common.SMALL_PREFILL_BUCKETS)
+    )
+    monkeypatch.delenv(ENV_PREFILL_GRAPH_KV_BOUND)
+    monkeypatch.setattr(prefill_graph_common, "is_npu_platform", lambda: False)
+
     monkeypatch.setenv(ENV_PREFILL_GRAPH_BUCKET_STEP, "256")
     monkeypatch.setenv(ENV_PREFILL_GRAPH_MAX_BUCKET, "1024")
     assert get_default_buckets() == [256, 512, 768, 1024]
+
+    # A deliberately tiny configured maximum still wins over the opt-in.
+    monkeypatch.setenv(ENV_PREFILL_GRAPH_KV_BOUND, "1024")
+    assert get_default_buckets() == [1, 16, 256, 512, 768, 1024]
+    monkeypatch.setenv(ENV_PREFILL_GRAPH_MAX_BUCKET, "8")
+    monkeypatch.setenv(ENV_PREFILL_GRAPH_BUCKET_STEP, "8")
+    assert get_default_buckets() == [1, 8]
 
 
 def test_prefill_bucket_config_validation(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -595,6 +710,90 @@ def test_gpu_max_seq_len_bound() -> None:
     meta = SimpleNamespace(max_seq_len=512)
     GPUPrefillGraphRunner._apply_max_seq_len_bound(meta, 2048)
     assert meta.max_seq_len == 2048
+
+
+def test_gpu_kv_capture_bound_matches_replay_gate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The value baked into the graph is the value the replay gate reads.
+
+    With the override unset the small buckets keep ``2 * bucket`` (they are
+    not in the grid at all), and the override only ever widens.
+    """
+    from vllm_gr.v1.worker.gpu_prefill_graph_runner import GPUPrefillGraphRunner
+    from vllm_gr.v1.worker.prefill_graph_common import ENV_PREFILL_GRAPH_KV_BOUND
+
+    monkeypatch.delenv(ENV_PREFILL_GRAPH_KV_BOUND, raising=False)
+    assert GPUPrefillGraphRunner._kv_capture_bound(1) == 2
+    assert GPUPrefillGraphRunner._kv_capture_bound(16) == 32
+    assert GPUPrefillGraphRunner._kv_capture_bound(128) == 256
+    assert GPUPrefillGraphRunner._kv_capture_bound(1024) == 2048
+
+    monkeypatch.setenv(ENV_PREFILL_GRAPH_KV_BOUND, "1024")
+    # Small buckets: the override is what makes them usable for cache hits.
+    assert GPUPrefillGraphRunner._kv_capture_bound(1) == 1024
+    assert GPUPrefillGraphRunner._kv_capture_bound(16) == 1024
+    # Buckets whose default already covers their contexts keep it.
+    assert GPUPrefillGraphRunner._kv_capture_bound(1024) == 2048
+    assert GPUPrefillGraphRunner._kv_capture_bound(2048) == 4096
+
+
+def test_gpu_bucket16_gate_uses_capture_bound(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A cache hit in bucket 16 is admitted within the bound, rejected beyond it.
+
+    This is the shape the small buckets exist for: 16 scheduled tokens with a
+    KV length equal to the whole context.
+    """
+    from types import SimpleNamespace
+
+    import numpy as np
+
+    from vllm_gr.v1.worker.gpu_prefill_graph_runner import GPUPrefillGraphRunner
+    from vllm_gr.v1.worker.prefill_graph_common import ENV_PREFILL_GRAPH_KV_BOUND
+
+    monkeypatch.setenv(ENV_PREFILL_GRAPH_KV_BOUND, "1024")
+    gpu_runner = GPUPrefillGraphRunner(MockModelRunner(), buckets=[16])
+    buf = gpu_runner.buffers[16]
+    buf.captured_graphs[1] = SimpleNamespace(replay=lambda: None)
+    buf.output_bufs[1] = torch.zeros(16, 8)
+    # What capture_graphs records for the gate; must be the same value it bakes
+    # into the graph (asserted by the sibling test above).
+    buf.max_seq_len_bounds[1] = GPUPrefillGraphRunner._kv_capture_bound(16)
+    assert buf.max_seq_len_bounds[1] == 1024
+
+    def runner_for(computed: int) -> Any:
+        return SimpleNamespace(
+            device=torch.device("cpu"),
+            input_batch=SimpleNamespace(
+                req_id_to_index={"rA": 0},
+                num_computed_tokens_cpu=np.array([computed]),
+                block_table=[
+                    SimpleNamespace(
+                        block_table=SimpleNamespace(gpu=torch.zeros(1, 4, dtype=torch.int32))
+                    )
+                ],
+            ),
+            query_start_loc=SimpleNamespace(gpu=torch.tensor([0, 16], dtype=torch.int32)),
+            seq_lens=torch.tensor([computed + 16], dtype=torch.int32),
+            kv_caches=[],
+        )
+
+    def replay(computed: int) -> Any:
+        gpu_runner.model_runner = runner_for(computed)
+        return gpu_runner.execute_model_prefill(
+            bucket=16,
+            input_ids=torch.zeros(16, dtype=torch.int32),
+            positions=torch.zeros(16, dtype=torch.int64),
+            slot_mapping=torch.zeros(16, dtype=torch.int64),
+            num_scheduled_tokens={"rA": 16},
+        )
+
+    # kvlen 1008 (16 scheduled onto a 992-token cached prefix) is within the
+    # capture bound, so the graph is replayed.
+    assert replay(992) is buf.output_bufs[1]
+    # Beyond it the step must fall back to eager: the captured scalar cannot
+    # change at replay time, so attention would only see the first 1024 keys.
+    assert replay(2000) is None
 
 
 def test_gpu_replay_falls_back_when_kvlen_exceeds_bound() -> None:

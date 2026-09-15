@@ -242,7 +242,10 @@ class NPUPrefillGraphRunner(BasePrefillGraphRunner):
             BeamAttentionMetadata,
         )
 
-        num_reqs = min(SUPPORTED_NUM_REQS[-1], CAPTURE_DUMMY_NUM_REQS)
+        # Every dummy request needs at least one token: with fewer tokens than
+        # the dummy width (small buckets), spreading them over the full width
+        # would leave zero-length requests. Cap the width by the bucket.
+        num_reqs = min(SUPPORTED_NUM_REQS[-1], CAPTURE_DUMMY_NUM_REQS, bucket)
         base_len = bucket // num_reqs
         rem = bucket % num_reqs
         req_lens = [base_len + (1 if i < rem else 0) for i in range(num_reqs)]
@@ -256,7 +259,11 @@ class NPUPrefillGraphRunner(BasePrefillGraphRunner):
 
         kv_cache_config = getattr(self.model_runner, "kv_cache_config", None)
         num_blocks = getattr(kv_cache_config, "num_blocks", None) if kv_cache_config else None
-        blocks_per_req = (base_len + builder.block_size - 1) // builder.block_size
+        # Size the table for the longest request, not the average: an uneven
+        # split (e.g. bucket 129 -> 17,16,...,16) needs an extra column, and
+        # the FIA input contract requires the block table to cover seq_len.
+        max_req_len = max(req_lens)
+        blocks_per_req = (max_req_len + builder.block_size - 1) // builder.block_size
         if num_blocks is None:
             num_blocks = blocks_per_req * num_reqs
         block_table = torch.zeros((num_reqs, blocks_per_req), dtype=torch.int32, device=self.device)
