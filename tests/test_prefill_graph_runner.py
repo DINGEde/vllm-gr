@@ -43,7 +43,12 @@ def test_match_bucket_standard() -> None:
 def test_match_bucket_dense_default_range() -> None:
     graph_runner = BeamPrefillGraphRunner(MockModelRunner())
 
-    assert graph_runner.match_bucket(1) == 128
+    # The default grid prepends exact small buckets for cache-hit tails:
+    # tail 1 (a separate gemv shape) gets bucket 1, tails 2..16 get bucket 16,
+    # and everything above keeps the 128-step range.
+    assert graph_runner.match_bucket(1) == 1
+    assert graph_runner.match_bucket(16) == 16
+    assert graph_runner.match_bucket(17) == 128
     assert graph_runner.match_bucket(128) == 128
     assert graph_runner.match_bucket(129) == 256
     assert graph_runner.match_bucket(8192) == 8192
@@ -465,12 +470,16 @@ def test_platform_bucket_config(
         get_default_buckets,
     )
 
-    # Both platforms use the configured dense bucket geometry.
-    expected_default_buckets = list(
-        range(
-            PREFILL_GRAPH_BUCKET_STEP_DEFAULT,
-            PREFILL_GRAPH_MAX_BUCKET_DEFAULT + 1,
-            PREFILL_GRAPH_BUCKET_STEP_DEFAULT,
+    # Both platforms use the configured dense bucket geometry, prefixed with
+    # the exact small buckets that cache-hit tails replay at.
+    expected_default_buckets = sorted(
+        set(prefill_graph_common.SMALL_PREFILL_BUCKETS)
+        | set(
+            range(
+                PREFILL_GRAPH_BUCKET_STEP_DEFAULT,
+                PREFILL_GRAPH_MAX_BUCKET_DEFAULT + 1,
+                PREFILL_GRAPH_BUCKET_STEP_DEFAULT,
+            )
         )
     )
     assert get_default_buckets() == DEFAULT_PREFILL_BUCKETS
@@ -482,7 +491,9 @@ def test_platform_bucket_config(
 
     monkeypatch.setenv(ENV_PREFILL_GRAPH_BUCKET_STEP, "256")
     monkeypatch.setenv(ENV_PREFILL_GRAPH_MAX_BUCKET, "1024")
-    assert get_default_buckets() == [256, 512, 768, 1024]
+    # The small buckets stay: 1 and 16 sit within the configured maximum, and
+    # only buckets beyond it are dropped.
+    assert get_default_buckets() == [1, 16, 256, 512, 768, 1024]
 
 
 def test_prefill_bucket_config_validation(monkeypatch: pytest.MonkeyPatch) -> None:

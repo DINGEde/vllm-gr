@@ -14,11 +14,25 @@ logger = init_logger(__name__)
 
 PREFILL_GRAPH_BUCKET_STEP_DEFAULT = 128
 PREFILL_GRAPH_MAX_BUCKET_DEFAULT = 8192
-DEFAULT_PREFILL_BUCKETS = list(
-    range(
-        PREFILL_GRAPH_BUCKET_STEP_DEFAULT,
-        PREFILL_GRAPH_MAX_BUCKET_DEFAULT + 1,
-        PREFILL_GRAPH_BUCKET_STEP_DEFAULT,
+# Small exact buckets prepended to the configured grid. A prefix-cache hit
+# schedules only the uncached tail ((((N - 1) mod block_size) + 1) <= 16
+# tokens at block_size 16), so on the step-sized grid every hit lands in the
+# smallest bucket (128) and pads 112+ rows: the replay then pays ~4 ms of
+# extra GEMM work (erasing the graph's overhead saving at the median) and,
+# with a widened KV bound, its M=128 linear layers no longer match the eager
+# tail's M=16 bit-for-bit. Tail 16 (and tails 2..15, which share cuBLAS
+# kernels with M=16 on the tested stacks) replays at bucket 16; tail 1 runs
+# a separate gemv kernel and needs bucket 1 to stay bit-identical to eager.
+# See docs/prefill_graph_hit_replay.md section 8 for the measurements.
+SMALL_PREFILL_BUCKETS = (1, 16)
+DEFAULT_PREFILL_BUCKETS = sorted(
+    set(SMALL_PREFILL_BUCKETS)
+    | set(
+        range(
+            PREFILL_GRAPH_BUCKET_STEP_DEFAULT,
+            PREFILL_GRAPH_MAX_BUCKET_DEFAULT + 1,
+            PREFILL_GRAPH_BUCKET_STEP_DEFAULT,
+        )
     )
 )
 # Public compatibility alias. Both platforms use the configured bucket range.
@@ -28,6 +42,7 @@ SUPPORTED_NUM_REQS = [1, 2, 3, 4, 5, 6, 7, 8]
 ENV_ENABLE_PREFILL_GRAPH = "VLLM_ENABLE_PREFILL_CUDAGRAPH"
 ENV_PREFILL_GRAPH_BUCKET_STEP = "VLLM_GR_PREFILL_GRAPH_BUCKET_STEP"
 ENV_PREFILL_GRAPH_MAX_BUCKET = "VLLM_GR_PREFILL_GRAPH_MAX_BUCKET"
+ENV_PREFILL_GRAPH_KV_BOUND = "VLLM_GR_PREFILL_GRAPH_KV_BOUND"
 
 
 def _read_positive_int_env(name: str, default: int) -> int:
@@ -80,7 +95,11 @@ def get_default_buckets() -> list[int]:
             f"{ENV_PREFILL_GRAPH_MAX_BUCKET} ({max_bucket}) must be divisible by "
             f"{ENV_PREFILL_GRAPH_BUCKET_STEP} ({step})"
         )
-    return list(range(step, max_bucket + 1, step))
+    # Merge the small exact buckets (cache-hit tails) into the configured
+    # step-sized grid; entries beyond a deliberately tiny configured maximum
+    # stay out so the override keeps its meaning.
+    small = {b for b in SMALL_PREFILL_BUCKETS if b <= max_bucket}
+    return sorted(small | set(range(step, max_bucket + 1, step)))
 
 
 def get_max_context_len(runner: Any) -> int:
@@ -96,6 +115,39 @@ def get_max_context_len(runner: Any) -> int:
         model_config = getattr(vllm_config, "model_config", None)
     max_model_len = getattr(model_config, "max_model_len", 0)
     return int(max_model_len or 0)
+
+
+def get_kv_capture_bound() -> int | None:
+    """Capture-time KV bound override; None keeps the shipped ``2 * bucket``.
+
+    The default bound couples the replay-eligible KV length to the bucket,
+    which only holds when a batch schedules roughly its own KV length. A
+    prefix-cache hit schedules just the uncached tail, so it matches the
+    smallest bucket while its real KV length is the whole context and every
+    such replay is rejected by the check in ``execute_model_prefill``.
+
+    Setting this variable widens the bound to at least this value for every
+    bucket that would otherwise bake less: the bucket still sizes the query
+    extent, while this value raises the captured attention extent
+    (``max_seq_len`` -> flash-attention ``max_seqlen_k``). Buckets whose
+    default bound is already larger keep it, so miss-path graphs stay
+    byte-identical to the default. ``max_seq_len`` feeds nothing else, so no
+    other buffer changes size with it.
+
+    Read once per captured bucket, i.e. once per process at capture time.
+    """
+    raw = os.getenv(ENV_PREFILL_GRAPH_KV_BOUND)
+    if raw is None or not raw.strip():
+        return None
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise ValueError(
+            f"{ENV_PREFILL_GRAPH_KV_BOUND} must be a positive integer, got {raw!r}"
+        ) from exc
+    if value <= 0:
+        raise ValueError(f"{ENV_PREFILL_GRAPH_KV_BOUND} must be a positive integer, got {raw!r}")
+    return value
 
 
 def _get_block_table_cols(runner: Any) -> int | None:
