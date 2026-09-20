@@ -28,8 +28,31 @@ model_id="${MODEL_ID:-OpenOneRec/OneRec-1.7B}"
 hf_endpoint="${HF_ENDPOINT:-https://hf-mirror.com}"
 num_prompts="${NUM_PROMPTS:-100}"
 warmup_requests="${WARMUP_REQUESTS:-10}"
+# 0 = measure canonical E2E only, which is what the AB report compares. Set
+# DIAGNOSTIC_PROMPTS>0 in benchmark.env to also collect the post-canonical
+# phase decomposition; it never contributes to the reported E2E numbers.
+diagnostic_prompts="${DIAGNOSTIC_PROMPTS:-0}"
 lightweight_timing="${LIGHTWEIGHT_TIMING:-0}"
+# Beam entry point benchmarked on BOTH sides. `v1` is the EngineCore-owned
+# beam_search_v1 path and the default for new A/B runs; set BEAM_API=legacy in
+# benchmark.env when the older of the two commits predates beam_search_v1.
+beam_api="${BEAM_API:-v1}"
+case "$beam_api" in
+  legacy|v1) ;;
+  *) echo "BEAM_API must be legacy or v1, got '$beam_api'" >&2; exit 2 ;;
+esac
 gpu_idle_limit_mib="${GPU_IDLE_LIMIT_MIB:-1024}"
+# Extra engine env for the benchmark container, space-separated KEY=VALUE
+# words, e.g. ENGINE_ENV="VLLM_GR_PREFILL_GRAPH_KV_BOUND=1024". Applied to
+# BOTH sides: a base that predates the env simply ignores it, so this is only
+# for gating behaviour that the head turns on -- not for A/B-ing the env
+# itself. Set it in benchmark.env (or per-round via the calling environment,
+# which benchmark.env defers to with its ${ENGINE_ENV:-} default).
+engine_env="${ENGINE_ENV:-}"
+engine_env_args=()
+for kv in $engine_env; do
+  engine_env_args+=(-e "$kv")
+done
 
 pr=""
 run_name=""
@@ -141,7 +164,7 @@ else
   report_label="${head_sha:0:8}"
 fi
 
-echo "AB: pr=$pr run=$run_name base=$base_sha head=$head_sha scenarios=${scenario_specs[*]}"
+echo "AB: pr=$pr run=$run_name base=$base_sha head=$head_sha beam_api=$beam_api scenarios=${scenario_specs[*]}"
 
 # ---- stage the benchmark engine into git-ignored results/ab/.tooling ----
 # Once tools/AB_Tests is committed to the repo, `git checkout` to an old
@@ -212,6 +235,7 @@ run_commit() {
   if ! docker exec -w "$container_project_dir" "${timing_env[@]}" \
     -e HF_ENDPOINT="$hf_endpoint" -e HF_HUB_DISABLE_XET=1 \
     -e LD_LIBRARY_PATH="$ld_library_path" \
+    ${engine_env_args[@]+"${engine_env_args[@]}"} \
     "$container" python3 "$tooling_dir/run_offline_benchmark.py" \
     --output "$container_scenario_dir/raw-result-${run_label}.json" \
     --data-dir "$container_data_dir" \
@@ -219,8 +243,10 @@ run_commit() {
     --model "$model_id" \
     --num-prompts "$num_prompts" \
     --warmup-requests "$warmup_requests" \
+    --diagnostic-prompts "$diagnostic_prompts" \
     --beam-width "$beam_width" \
     --input-length "$input_length" \
+    --beam-api "$beam_api" \
     >"$scenario_dir/benchmark-${run_label}.log" 2>&1; then
     echo "[$side $short $run_label] benchmark FAILED; see $scenario_dir/benchmark-${run_label}.log" >&2
     return 1

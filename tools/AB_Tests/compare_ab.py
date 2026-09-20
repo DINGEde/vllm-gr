@@ -4,8 +4,11 @@
 """Compare baseline vs head offline AB summaries and emit a markdown delta report.
 
 Reads one or more ``vllm-gr-summary.json`` files per side (one per A-B-B-A
-repeat) and reports, for a small set of primary latency metrics, the percent
+repeat) and reports, for the canonical E2E latency metrics, the percent
 change from baseline to head together with a noise-threshold verdict.
+
+The phase decomposition (``prefill``/``decode``/``host_overhead`` …) is not
+part of the report: the AB run measures E2E only.
 
 ``delta% = (head - baseline) / baseline * 100`` — positive means slower (a
 regression), negative means faster (an improvement). Each metric is a single
@@ -31,17 +34,14 @@ if hasattr(sys.stdout, "reconfigure"):
 # Noise thresholds (same values as validate_lightweight_timing.py).
 NOISE_LIMITS: dict[str, float] = {"mean": 2.0, "p50": 2.0, "p90": 3.0, "p99": 5.0}
 
-# Primary metrics shown in the report. The finer-grained engine/CPU breakdown
-# remains available in the per-scenario JSON summaries but is intentionally
-# omitted from the main table to keep the signal readable.
+# Primary metrics shown in the report: canonical E2E only, cold-cache (miss)
+# and warm-cache (hit). The phase decomposition is deliberately absent — it is
+# no longer measured (see ``--diagnostic-prompts`` in run_offline_benchmark.py),
+# and under v1 async scheduling it is a device-timeline caliber that moves for
+# reasons unrelated to the request latency a PR is judged on.
 KEY_METRICS = [
     "e2el",  # end-to-end, cold-cache (miss) request
     "e2el_hit",  # end-to-end, warm-cache (hit) request
-    "prefill",  # prefill phase, combined miss+hit
-    "prefill_hit",  # prefill phase, warm-cache hit
-    "decode",  # decode phase, combined miss+hit
-    "decode_hit",  # decode phase, warm-cache hit
-    "total_beam",  # full beam-search aggregate
 ]
 
 PERCENTILES = ("mean", "p50", "p90", "p99")
@@ -51,20 +51,13 @@ def load(path: Path) -> dict:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
-def metric_sources(s: dict) -> tuple[dict, dict]:
-    """Return canonical and post-canonical diagnostic latency maps."""
-    results = s.get("results", {})
-    canonical = results.get("latency_ms", {})
-    diagnostic = (results.get("diagnostic") or {}).get("latency_ms", {})
-    return canonical, diagnostic
+def canonical_latency(s: dict) -> dict:
+    """Canonical E2E latency map (``e2el`` / ``e2el_hit``).
 
-
-def metric_source(s: dict, metric: str) -> dict:
-    """Use canonical samples for E2E and diagnostics for internal stages."""
-    canonical, diagnostic = metric_sources(s)
-    if metric in ("e2el", "e2el_hit"):
-        return canonical
-    return diagnostic or canonical
+    The post-canonical ``results.diagnostic`` block is intentionally not read:
+    AB reports E2E only, and a run may omit the phase decomposition entirely.
+    """
+    return s.get("results", {}).get("latency_ms", {})
 
 
 def merge_latency(paths: list[Path]) -> dict[str, dict[str, float]]:
@@ -75,9 +68,9 @@ def merge_latency(paths: list[Path]) -> dict[str, dict[str, float]]:
         row: dict[str, float] = {}
         for pctl in PERCENTILES:
             values = [
-                float(metric_source(s, metric)[metric][pctl])
+                float(canonical_latency(s)[metric][pctl])
                 for s in summaries
-                if metric in metric_source(s, metric) and pctl in metric_source(s, metric)[metric]
+                if metric in canonical_latency(s) and pctl in canonical_latency(s)[metric]
             ]
             if values:
                 row[pctl] = statistics.median(values)

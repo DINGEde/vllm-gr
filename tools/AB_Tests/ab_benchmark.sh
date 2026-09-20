@@ -19,6 +19,9 @@ set -Eeuo pipefail
 SERVER="${AB_SERVER:-}"                                    # ssh alias (required)
 REMOTE_DIR="${AB_REMOTE_DIR:-/root/vllm-gr-decode-graph}"  # server worktree path
 SCENARIO="${AB_SCENARIO:-128:1024}"                        # beam_width:input_tokens
+# Empty means "whatever the server's benchmark.env says" (default v1), so a
+# server-side BEAM_API is not silently overridden by this client's default.
+BEAM_API="${AB_BEAM_API:-}"                                # legacy|v1, both sides
 POLL_INTERVAL="${AB_POLL_INTERVAL:-30}"                    # poll interval (seconds)
 TIMEOUT="${AB_TIMEOUT:-3600}"                              # wait timeout (seconds)
 GH_BIN="${GH_BIN:-gh}"
@@ -34,6 +37,9 @@ Usage: $0 <PR> [options]   or   $0 --base <sha> --head <sha> [options]
   --server <alias>     benchmark server ssh alias (or set AB_SERVER)
   --remote-dir <dir>   server vllm-gr worktree path (default $REMOTE_DIR)
   --scenario b:i       beam_width:input_tokens (default 128:1024)
+  --beam-api <api>     legacy|v1 entry point for BOTH sides. Omit to use the
+                       server's benchmark.env (default v1). Use legacy when the
+                       older commit predates beam_search_v1.
   --save-dir <dir>     also download the .md/.json report here
 EOF
 }
@@ -43,6 +49,7 @@ while [[ $# -gt 0 ]]; do
     --server)      SERVER="$2"; shift 2 ;;
     --remote-dir)  REMOTE_DIR="$2"; shift 2 ;;
     --scenario)    SCENARIO="$2"; shift 2 ;;
+    --beam-api)    BEAM_API="$2"; shift 2 ;;
     --base)        base="$2"; shift 2 ;;
     --head)        head="$2"; shift 2 ;;
     --save-dir)    save_dir="$2"; shift 2 ;;
@@ -60,6 +67,16 @@ fi
 beam_width="${BASH_REMATCH[1]}"
 input_length="${BASH_REMATCH[2]}"
 case "$beam_width" in 64|128|256) ;; *) echo "beam width must be 64/128/256" >&2; exit 2 ;; esac
+
+# ---- validate beam api (empty = defer to the server's benchmark.env) ----
+case "$BEAM_API" in
+  ""|legacy|v1) ;;
+  *) echo "invalid --beam-api '$BEAM_API' (expected legacy or v1)" >&2; exit 2 ;;
+esac
+beam_api_export=""
+if [[ -n "$BEAM_API" ]]; then
+  beam_api_export="export BEAM_API='$BEAM_API';"
+fi
 
 # ---- resolve base/head ----
 if [[ -n "$pr" ]]; then
@@ -125,9 +142,9 @@ ssh "$SERVER" "mkdir -p '$REMOTE_DIR/results/ab'" </dev/null
 
 # Redirect the ENTIRE background job's stdin/stdout/stderr so ssh returns
 # immediately; otherwise ssh waits for the pipeline's fds to close.
-launch_cmd="( cd '$REMOTE_DIR' && nohup /usr/bin/bash tools/AB_Tests/ab_runner.sh --pr '$pr' --run '$invocation' $runner_base_arg --head '$head' --scenario '${beam_width}:${input_length}' ) > '$log_path' 2>&1 </dev/null &"
+launch_cmd="( cd '$REMOTE_DIR' && $beam_api_export nohup /usr/bin/bash tools/AB_Tests/ab_runner.sh --pr '$pr' --run '$invocation' $runner_base_arg --head '$head' --scenario '${beam_width}:${input_length}' ) > '$log_path' 2>&1 </dev/null &"
 
-echo "launching A-B-B-A on $SERVER (scenario ${beam_width}:${input_length})..."
+echo "launching A-B-B-A on $SERVER (scenario ${beam_width}:${input_length}, beam-api ${BEAM_API:-server default})..."
 # shellcheck disable=SC2029  # launch_cmd expands on the client side by design
 ssh "$SERVER" "$launch_cmd" </dev/null
 

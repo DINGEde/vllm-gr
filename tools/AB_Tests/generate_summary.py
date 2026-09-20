@@ -320,33 +320,74 @@ def main() -> int:
                 "decode": decode_common,
                 "decode_miss": diagnostic_distributions["decode_ms_miss"],
                 "decode_hit": diagnostic_distributions["decode_ms_hit"],
-                "total_beam": distribution_ms(
-                    diagnostic_miss["total_beam_ms"] + diagnostic_hit["total_beam_ms"]
-                ),
             }
+            if "total_beam_ms" in diagnostic_miss:
+                # Legacy host-wall phases sum to the whole beam loop; the V1
+                # device-timeline decomposition replaces it with host_overhead.
+                diagnostic_latency["total_beam"] = distribution_ms(
+                    diagnostic_miss["total_beam_ms"] + diagnostic_hit["total_beam_ms"]
+                )
+            for raw_name, metric_name in (
+                ("prefill_output_consumed_ms", "prefill_output_consumed"),
+                ("prefill_dispatch_ms", "prefill_dispatch"),
+                ("prefill_cpu_lead_ms", "prefill_cpu_lead"),
+                ("host_overhead_ms", "host_overhead"),
+            ):
+                if raw_name not in diagnostic_miss:
+                    continue
+                diagnostic_latency.update(
+                    {
+                        f"{metric_name}_miss": diagnostic_distributions[f"{raw_name}_miss"],
+                        f"{metric_name}_hit": diagnostic_distributions[f"{raw_name}_hit"],
+                        metric_name: distribution_ms(
+                            diagnostic_miss[raw_name] + diagnostic_hit[raw_name]
+                        ),
+                    }
+                )
         duration_seconds = float(raw["duration_seconds"])
         output_total = int(raw["aggregate_output_tokens"])
         input_total = sum(observed_input_lengths)
         requests_per_second = num_prompts / duration_seconds
         output_tokens_per_second = output_total / duration_seconds
         total_tokens_per_second = (input_total + output_total) / duration_seconds
+        beam_api = raw.get("beam_api", "beam_search")
         beam_search_metrics = (
             {
                 "requests": int(diagnostic_raw["num_prompts"]),
                 "prefill_mean_ms": diagnostic_latency["prefill"]["mean"],
                 "decode_mean_ms": diagnostic_latency["decode"]["mean"],
-                "total_mean_ms": diagnostic_latency["total_beam"]["mean"],
+                # total_beam is host-wall only; the V1 device decomposition has
+                # no equivalent, and the schema rejects a null here.
+                **(
+                    {"total_mean_ms": diagnostic_latency["total_beam"]["mean"]}
+                    if "total_beam" in diagnostic_latency
+                    else {}
+                ),
             }
             if diagnostic_latency
             else None
         )
         notes = [
-            "Offline GRLLM.beam_search; max_concurrency=1 and one prompt per call.",
-            "Canonical E2E is measured before diagnostic sampling with one outer perf_counter_ns and no internal monkeypatch or profiler.",
+            f"Offline GRLLM.{beam_api}; max_concurrency=1 and one prompt per call.",
+            "Canonical E2E is measured before diagnostic sampling with one outer perf_counter_ns, no internal monkeypatch, no profiler, and a final CUDA completion fence.",
             "Each canonical sample is a cold-cache call followed by an identical warm-cache call.",
             "Offline E2E excludes HTTP, SSE, serialization, and network round-trip overhead.",
-            "Internal stage values come from a smaller post-canonical diagnostic sample and never contribute to the official E2E trend.",
         ]
+        if diagnostic_latency:
+            notes.append(
+                "Internal stage values come from a smaller post-canonical diagnostic sample "
+                "and never contribute to the reported E2E numbers."
+            )
+        else:
+            notes.append(
+                "Phase decomposition was not measured; this run reports canonical E2E only."
+            )
+        if diagnostic_latency and beam_api == "beam_search_v1":
+            notes.append(
+                "V1 Prefill and Decode are CUDA device-timeline intervals on one FIFO compute "
+                "stream, so they are additive and sum with host_overhead back to E2E; Decode "
+                "absorbs device idle inside the Decode stage."
+            )
     else:
         latency_metrics = {name: latency(raw, name) for name in ("ttft", "tpot", "itl", "e2el")}
         duration_seconds = raw["duration"]
@@ -437,7 +478,25 @@ def main() -> int:
             if offline
             else f"RecIF video / beam-{args.beam_width} / input-{args.input_length} / concurrency-{raw['max_concurrency']}",
             "execution_mode": "offline" if offline else "online",
-            "endpoint": "GRLLM.beam_search" if offline else "/v1/chat/completions",
+            # Which beam entry point produced these numbers; the A/B report is
+            # only meaningful when both sides used the same one. Omitted rather
+            # than null for online summaries, which the schema rejects.
+            **(
+                {
+                    key: value
+                    for key, value in (
+                        ("beam_api", raw.get("beam_api", "beam_search")),
+                        ("beam_execution_mode", raw.get("beam_execution_mode")),
+                        ("pipeline_version", raw.get("pipeline_version")),
+                    )
+                    if value
+                }
+                if offline
+                else {}
+            ),
+            "endpoint": (
+                f"GRLLM.{raw.get('beam_api', 'beam_search')}" if offline else "/v1/chat/completions"
+            ),
             "backend": "vllm-gr-offline" if offline else raw["backend"],
             "num_prompts": num_prompts,
             "max_concurrency": raw["max_concurrency"],
@@ -505,7 +564,11 @@ def main() -> int:
                 {
                     "trend_eligible": False,
                     "num_prompts": int(diagnostic_raw.get("num_prompts", 0)),
-                    "method": "post-canonical minimal 2-function perf_counter monkeypatch (prefill/decode boundary only)",
+                    "method": (
+                        "post-canonical V1 one-shot CUDA event pairs bracketing the Prefill and Decode stages on the engine compute stream"
+                        if raw.get("beam_execution_mode") == "v1"
+                        else "post-canonical minimal 2-function perf_counter monkeypatch (prefill/decode boundary only)"
+                    ),
                     "latency_ms": diagnostic_latency,
                     "phase_definition": diagnostic_raw.get("phase_definition"),
                 }

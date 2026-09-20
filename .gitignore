@@ -232,6 +232,11 @@ tmp/
 # Benchmark results (A/B tests and daily benchmarks)
 results/
 
+# Local snapshot of the dashboard's daily-benchmark toolkit. The source of
+# truth is DINGEde/vllm-gr-performance-dashboard, not this repo -- keeping it
+# out of git stops a stale copy from being committed here.
+tools/daily_benchmark/
+
 # setuptools-scm generated version file
 vllm_gr/_version.py
 
