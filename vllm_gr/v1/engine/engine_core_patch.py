@@ -125,7 +125,10 @@ def make_patched_handle_client_request(original):
     def patched_handle_client_request(self, request_type, request, *args, **kwargs):
         from vllm.v1.engine import EngineCoreRequestType
 
-        from vllm_gr.v1.engine.core import dispatch_gr_engine_core_input
+        from vllm_gr.v1.engine.core import (
+            dispatch_gr_engine_core_input,
+            send_gr_rejection,
+        )
         from vllm_gr.v1.engine.gr_async_scheduler import GRAdmissionError
 
         if dispatch_gr_engine_core_input(self, request_type, request):
@@ -143,9 +146,10 @@ def make_patched_handle_client_request(original):
                     native_request.request_id,
                     error,
                 )
-                self._send_error_outputs_to_client(
-                    [native_request.request_id], native_request.client_index
-                )
+                # A bare error output is indistinguishable from an engine
+                # fault at the frontend, which then reports the rejection as
+                # a server error. Carry the reason with the terminal status.
+                send_gr_rejection(self, native_request, str(error))
                 return None
         return original(self, request_type, request, *args, **kwargs)
 

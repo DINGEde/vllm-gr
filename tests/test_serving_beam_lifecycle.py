@@ -15,6 +15,9 @@ from vllm.logprobs import FlatLogprobs
 from vllm.outputs import RequestOutput
 
 from vllm_gr.entrypoints.openai import serving_engine
+from vllm_gr.v1.beam.batch_contracts import GR_BATCH_RESULT_PARAM, admission_rejected
+from vllm_gr.v1.engine import async_llm
+from vllm_gr.v1.engine.async_llm import note_admission_rejections
 from vllm_gr.v1.engine.types import BeamRequestStepUpdate
 
 
@@ -100,8 +103,10 @@ def _engine_output(
     *,
     finish_reason: str | None = None,
     kv_transfer_params: dict[str, Any] | None = None,
+    request_id: str | None = None,
 ) -> SimpleNamespace:
     return SimpleNamespace(
+        request_id=request_id,
         outputs=[
             SimpleNamespace(
                 finish_reason=finish_reason,
@@ -375,7 +380,13 @@ def test_grouped_engine_error_yields_error_and_cleans_up(
     _install_deterministic_request_ids(monkeypatch)
     engine = _GroupedEngineClient(
         prepare_outputs=[_engine_output(_flat([11, 12], [-0.1, -0.2]))],
-        grouped_outputs=[_engine_output(None, finish_reason="error")],
+        grouped_outputs=[
+            _engine_output(
+                None,
+                finish_reason="error",
+                request_id="error-request-step-0",
+            )
+        ],
     )
     outputs = _run_search(engine, max_tokens=3, request_id="error-request")
     assert len(engine.beam_updates) == 2
@@ -397,6 +408,40 @@ def test_grouped_engine_error_yields_error_and_cleans_up(
     assert output.outputs[0].token_ids == []
     assert output.outputs[0].cumulative_logprob is None
     assert output.outputs[0].logprobs is None
+
+
+def test_a_refused_grouped_request_hands_its_reason_to_the_callers_id(
+    monkeypatch: Any,
+) -> None:
+    """The bridge the shared error check needs, driven through the generator.
+
+    The engine answers under the id it was handed, which at this call site is
+    the extension of the caller's built by the frontend; the reason has to come
+    back under the caller's own name or the serving layer can only see a bare
+    error finish reason and reports a refusal as an engine fault.
+    """
+    _install_deterministic_request_ids(monkeypatch)
+    reason = "beam_width must equal the fixed runtime width 128"
+    engine_id = "error-request-step-0"
+    refusal = _engine_output(
+        None,
+        finish_reason="error",
+        request_id=engine_id,
+        kv_transfer_params={GR_BATCH_RESULT_PARAM: admission_rejected(engine_id, reason)},
+    )
+    engine = _GroupedEngineClient(
+        prepare_outputs=[_engine_output(_flat([11, 12], [-0.1, -0.2]))],
+        grouped_outputs=[refusal],
+    )
+    processor = SimpleNamespace()
+    engine.output_processor = processor
+    note_admission_rejections(processor, [refusal])
+
+    _run_search(engine, max_tokens=3, request_id="error-request")
+
+    # Filed under the engine's name on the way through, the caller's on the way
+    # out, and never under both at once.
+    assert getattr(processor, async_llm._ADMISSION_REJECTIONS_ATTR) == {"error-request": reason}
 
 
 def test_eos_and_distinct_sid_end_token_both_complete() -> None:

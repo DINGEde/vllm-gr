@@ -57,8 +57,13 @@ release require the complete binding.
 Expected GR admission failures (unsupported mixing, duplicate identity,
 request Beam geometry or permanent KV capacity excess) raise
 `GRAdmissionError`. In the multiprocess path, the EngineCore ADD consumer
-catches only this type and sends one native `FinishReason.ERROR` response to
-the rejected request's client. Admission stays on the EngineCore thread;
+catches only this type and answers the rejected request's client with one
+terminal output whose reason travels with it: the rejection is attached on
+the output's `kv_transfer_params` as an `admission_rejected` failure, so a
+frontend reports the caller's own mistake as a client error instead of
+filing it under engine faults. Request-content refusals raised before the
+batch is queued take the same path; deployment-configuration failures stay
+on the preprocessing error path. Admission stays on the EngineCore thread;
 the socket thread only preprocesses and queues ADD. In-process callers
 receive the admission exception directly. Other internal exceptions retain
 the native engine-failure behavior, and shutdown retains native abort

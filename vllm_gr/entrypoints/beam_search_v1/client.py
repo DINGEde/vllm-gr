@@ -11,9 +11,10 @@ import time
 from collections.abc import Awaitable, Callable
 from typing import Any
 
+from vllm.exceptions import VLLMValidationError
 from vllm.v1.engine.exceptions import EngineDeadError
 
-from vllm_gr.entrypoints.beam_search_v1.exceptions import BeamSearchEngineError
+from vllm_gr.entrypoints.beam_search_v1.exceptions import failure_exception
 from vllm_gr.entrypoints.beam_search_v1.input_processor import BeamSearchInputProcessor
 from vllm_gr.entrypoints.beam_search_v1.output_processor import (
     BeamSearchOutputProcessor,
@@ -25,6 +26,7 @@ from vllm_gr.entrypoints.beam_search_v1.protocol import (
 )
 from vllm_gr.logger import init_logger
 from vllm_gr.v1.beam.batch_contracts import (
+    ADMISSION_REJECTED_CODE,
     BEAM_BATCH_PROTOCOL_VERSION,
     BeamBatchFailure,
     BeamBatchRequest,
@@ -111,6 +113,19 @@ def _create_failure_result(batch_id: str, code: str, exc: Exception) -> BeamBatc
     )
 
 
+def _submission_failure(exc: Exception) -> BeamBatchFailure:
+    """Classify a submission that never became a session.
+
+    Async scheduling refuses a request it cannot run before registering
+    anything, which makes the exception a description of the request rather
+    than of the engine. Anything else here is the transport failing.
+    """
+    from vllm_gr.v1.engine.gr_async_scheduler import GRAdmissionError
+
+    code = ADMISSION_REJECTED_CODE if isinstance(exc, GRAdmissionError) else "submit_failed"
+    return BeamBatchFailure(code=code, message=str(exc), item_index=None)
+
+
 class BeamSearchClient:
     """Offline A2 adapter. A3 supplies the EngineCore transport methods."""
 
@@ -136,8 +151,7 @@ class BeamSearchClient:
             raise
         except Exception as exc:
             _run_sync_cleanup(lambda: abort(request.batch_id), request.batch_id)
-            failure = BeamBatchFailure("submit_failed", str(exc), None)
-            raise BeamSearchEngineError(failure) from exc
+            raise failure_exception(_submission_failure(exc)) from exc
         return BeamSearchSession(
             batch_id=request.batch_id,
             session_id=request.batch_id,
@@ -168,7 +182,7 @@ class BeamSearchClient:
         result: BeamBatchResult,
     ) -> list[Any]:
         if result.failure is not None:
-            raise BeamSearchEngineError(result.failure)
+            raise failure_exception(result.failure)
         prepared = self._boundary_tokens
         boundaries = (
             prepared[1] if prepared is not None and prepared[0] == request.batch_id else None
@@ -230,8 +244,7 @@ class AsyncBeamSearchClient:
             raise
         except Exception as exc:
             await self._rollback_submission(request.batch_id, submission)
-            failure = BeamBatchFailure("submit_failed", str(exc), None)
-            raise BeamSearchEngineError(failure) from exc
+            raise failure_exception(_submission_failure(exc)) from exc
         return BeamSearchSession(
             batch_id=request.batch_id,
             session_id=request.batch_id,
@@ -289,10 +302,14 @@ class AsyncBeamSearchClient:
         result: BeamBatchResult,
     ) -> list[Any]:
         if result.failure is not None:
-            raise BeamSearchEngineError(result.failure)
+            raise failure_exception(result.failure)
         tokenizer = self.serving.input_processor.tokenizer
         if tokenizer is None:
-            raise RuntimeError("beam_search_v1 tokenizer became unavailable")
+            raise VLLMValidationError(
+                "beam_search_v1 requires tokenizer initialization",
+                parameter="skip_tokenizer_init",
+                value=True,
+            )
         prepared = self._boundary_tokens
         boundaries = (
             prepared[1] if prepared is not None and prepared[0] == request.batch_id else None

@@ -242,6 +242,26 @@ def is_gr_session_retired(self: Any, session_id: str) -> bool:
     return session_id not in getattr(self.scheduler, "_gr_v1_sessions", {})
 
 
+def send_gr_rejection(engine: Any, engine_request: Any, message: str) -> None:
+    """Answer a refused GR session with the terminal payload it never produced.
+
+    Upstream's error output carries no ``gr_batch_result``, and a frontend can
+    only read that absence as a broken engine. Sending the failure the session
+    would have reported keeps the reason, and its status class, intact.
+    """
+    from vllm_gr.v1.beam.batch_contracts import admission_rejected
+
+    request_id = engine_request.request_id
+    output = EngineCoreOutput(request_id, [], finish_reason=FinishReason.ERROR)
+    output.kv_transfer_params = {"gr_batch_result": admission_rejected(request_id, message)}
+    engine.output_queue.put_nowait(
+        (
+            engine_request.client_index,
+            EngineCoreOutputs(outputs=[output], finished_requests=[request_id]),
+        )
+    )
+
+
 def _handle_submit_gr_session(self, batch_request) -> None:
     """Preprocess once, then let Scheduler register and run the persistent session."""
     if not batch_request.items:
@@ -256,6 +276,22 @@ def _handle_submit_gr_session(self, batch_request) -> None:
         )
 
         validate_gr_request(batch_request)
+    except ValueError as error:
+        # The request is answerable, so it must not take the preprocessing
+        # error path: that one logs a traceback and sends a bare
+        # FinishReason.ERROR, which the frontend can only read as a fault.
+        # In-process callers have no output socket, so the rejection travels
+        # to them as the exception the multiprocess handler encodes.
+        if getattr(self, "output_queue", None) is None:
+            from vllm_gr.v1.engine.gr_async_scheduler import GRAdmissionError
+
+            raise GRAdmissionError(str(error)) from error
+        send_gr_rejection(self, engine_request, str(error))
+        return
+    try:
+        # Deployment configuration stays on the preprocessing error path: an
+        # engine started with the wrong settings is a server fault, not
+        # something the caller can fix by resending.
         validate_gr_execution_config(self.vllm_config)
         validate_gr_device_config(self.vllm_config)
         if self.batch_queue is None or self.batch_queue_size < 2:

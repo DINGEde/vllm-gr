@@ -23,6 +23,14 @@ from vllm_gr.config import MAX_BEAM_WIDTH
 
 BEAM_BATCH_PROTOCOL_VERSION = 1
 DEFAULT_CONSTRAINT_RESOURCE_ID = "default"
+# Terminal failure code for a request the engine refused before the session
+# started. It is the one code the frontend reports as a client error; every
+# other code means the engine or its Worker failed.
+ADMISSION_REJECTED_CODE = "admission_rejected"
+# Terminal result key on ``EngineCoreOutput.kv_transfer_params``. The field is
+# untyped IPC, so every reader has to tolerate the shapes in
+# ``admission_rejection`` below.
+GR_BATCH_RESULT_PARAM = "gr_batch_result"
 
 
 class BeamContractError(ValueError):
@@ -174,6 +182,53 @@ class BeamBatchResult(
     batch_id: str
     output: BeamBatchOutput | None
     failure: BeamBatchFailure | None
+
+
+def admission_rejected(batch_id: str, message: str) -> BeamBatchResult:
+    """The terminal result for a session the engine refused before starting.
+
+    Admission rejects a request on its own contents -- the caller's answer to
+    act on -- while every other terminal failure describes a broken engine or
+    Worker. Both travel as the same payload, so the code is what keeps the two
+    apart at the frontend.
+    """
+    return BeamBatchResult(
+        protocol_version=BEAM_BATCH_PROTOCOL_VERSION,
+        batch_id=batch_id,
+        output=None,
+        failure=BeamBatchFailure(ADMISSION_REJECTED_CODE, message, None),
+    )
+
+
+def admission_rejection(output: object) -> str | None:
+    """The message of the admission rejection carried by ``output``, if any.
+
+    A serving frontend sees its request end on a bare ``FinishReason.ERROR``
+    output, whose reason it would otherwise have to report as a server fault.
+    This recovers the reason the engine attached, and returns ``None`` for
+    everything else -- outputs without a terminal result, results that failed
+    for another reason, and payloads that do not parse.
+
+    ``kv_transfer_params`` is an untyped IPC field, so a multiprocess
+    deployment delivers the array-like Struct as the plain list it encodes to
+    while an in-process caller holds the Struct itself.
+    """
+    params = getattr(output, "kv_transfer_params", None)
+    if not isinstance(params, dict):
+        return None
+    result = params.get(GR_BATCH_RESULT_PARAM)
+    if isinstance(result, BeamBatchResult):
+        failure = result.failure
+    elif isinstance(result, (list, tuple)):
+        try:
+            failure = msgspec.convert(result, type=BeamBatchResult).failure
+        except msgspec.ValidationError:
+            return None
+    else:
+        return None
+    if failure is None or failure.code != ADMISSION_REJECTED_CODE:
+        return None
+    return failure.message
 
 
 @dataclass(frozen=True, slots=True)

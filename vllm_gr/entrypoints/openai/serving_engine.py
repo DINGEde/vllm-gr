@@ -3,6 +3,7 @@
 import asyncio
 import time
 from collections.abc import AsyncGenerator, Mapping
+from copy import copy
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -39,7 +40,11 @@ from vllm_gr.constraints.strategies import (
 from vllm_gr.logprobs import reconstruct_beam_logprobs_batch
 from vllm_gr.sampling_params import clone_beam_decode_sampling_params
 from vllm_gr.tokenizer_fast import fast_batch_decode
-from vllm_gr.utils.engine_lifecycle import frontend_request_scope
+from vllm_gr.utils.engine_lifecycle import (
+    frontend_request_scope,
+    schedule_frontend_gc_freeze,
+)
+from vllm_gr.v1.engine.async_llm import adopt_admission_rejection
 from vllm_gr.v1.engine.types import BeamRequestStepUpdate
 from vllm_gr.v1.metrics.beam_search_metrics import record_beam_search_metrics
 from vllm_gr.v1.metrics.stats import RequestStateStats
@@ -59,6 +64,7 @@ def create_online_beam_search_v1_client(self) -> "AsyncBeamSearchFrontend":
     return AsyncBeamSearchClient(self)
 
 
+@frontend_request_scope
 async def beam_search_v1(
     self,
     prompt: EngineInput,
@@ -67,15 +73,37 @@ async def beam_search_v1(
     lora_request: LoRARequest | None = None,
     trace_headers: Mapping[str, str] | None = None,
 ) -> AsyncGenerator[RequestOutput, None]:
-    """Submit one online V1 request and yield terminal outputs only."""
+    """Submit one online V1 request and yield terminal outputs only.
+
+    ``ignore_eos`` is not a client choice on this interface. V1 runs the whole
+    beam group as one persistent session over a fixed budget, so a beam that
+    stopped early would make the terminal step data-dependent and the engine
+    rejects such a request outright -- there is exactly one value it can serve.
+    Supplying it here is what makes an otherwise ordinary request work, and
+    doing it at this boundary rather than in the shared parser is also what
+    keeps it off an engine that is not running V1.
+    """
     from vllm_gr.config import BeamExecutionMode
     from vllm_gr.config.execution import require_beam_execution_mode
 
     require_beam_execution_mode(
         getattr(self.engine_client, "vllm_config", None), BeamExecutionMode.V1
     )
+    if not isinstance(prompt, str) and prompt.get("type") == "enc_dec":
+        # A session runs the one token stream its decoder owns, and the engine
+        # refuses the multimodal features an encoder-decoder request arrives
+        # with. The speech-to-text endpoints reach beam search through here,
+        # so name what is missing instead of failing on a schema the caller
+        # never sees.
+        raise NotImplementedError(
+            "beam search is not implemented for encoder-decoder inputs such as "
+            "speech-to-text requests"
+        )
     from vllm_gr.entrypoints.beam_search_v1 import run_beam_search_v1_async
     from vllm_gr.entrypoints.beam_search_v1.protocol import OnlineBeamSearchRequest
+
+    params = copy(params)
+    params.ignore_eos = True
 
     priority = int(time.perf_counter() * 1_000_000)
     rank = await _next_data_parallel_rank(self.engine_client)
@@ -93,6 +121,13 @@ async def beam_search_v1(
         create_online_beam_search_v1_client(self),
         call,
     )
+    # Multi-process deployments run this serving frontend in a process
+    # separate from the EngineCore/worker, whose GC freeze cannot reach here.
+    # Freeze the frontend heap once after the first beam request so the
+    # driver's own gen-1 GC (heavy per-request beam bookkeeping) cannot spike
+    # request latency on a fixed cadence.  Idempotent; spawns a daemon thread.
+    schedule_frontend_gc_freeze()
+
     for output in outputs:
         yield output
 
@@ -822,6 +857,10 @@ async def beam_search(
                 await _beam_request_cleanup(
                     self.engine_client, prefill_id, prev_beam_internal_ids, rank
                 )
+                # The engine answered under the id it was handed, which is the
+                # extension of the caller's built below; name it back so the
+                # shared error check reports a refusal as a refusal.
+                adopt_admission_rejection(self.engine_client, beam_result.request_id, request_id)
                 yield RequestOutput(
                     request_id=request_id,
                     prompt=prompt_text,
@@ -943,6 +982,7 @@ async def beam_search(
                     break
                 current_beam = all_beams[i]
                 if result.outputs[0].finish_reason == "error":
+                    adopt_admission_rejection(self.engine_client, result.request_id, request_id)
                     yield RequestOutput(
                         request_id=request_id,
                         prompt=prompt_text,

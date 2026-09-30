@@ -12,6 +12,7 @@ from typing import Any, NoReturn, cast
 from unittest.mock import AsyncMock
 
 import pytest
+from vllm.exceptions import VLLMValidationError
 
 from vllm_gr.entrypoints.beam_search_v1 import (
     run_beam_search_v1,
@@ -28,6 +29,7 @@ from vllm_gr.entrypoints.beam_search_v1.protocol import (
     OnlineBeamSearchRequest,
 )
 from vllm_gr.v1.beam.batch_contracts import (
+    ADMISSION_REJECTED_CODE,
     BEAM_BATCH_PROTOCOL_VERSION,
     BeamBatchFailure,
     BeamBatchRequest,
@@ -446,6 +448,29 @@ def test_terminal_failure_precedes_tokenizer_access(online: bool) -> None:
             call = OfflineBeamSearchRequest([[1, 2]], object())
         client.build_output(call, _request(), result)
     assert caught.value.failure is failure
+
+
+@pytest.mark.parametrize("online", [False, True])  # type: ignore[misc]
+def test_admission_rejection_is_a_client_error_after_a_terminal_result(online: bool) -> None:
+    """A rejection the engine sends back is the request being answered.
+
+    The terminal payload has one shape, so the code is the whole difference
+    between telling the caller what to change and reporting a server fault for
+    a session that never ran.
+    """
+    failure = BeamBatchFailure(ADMISSION_REJECTED_CODE, "beam_width must equal 128", None)
+    result = BeamBatchResult(BEAM_BATCH_PROTOCOL_VERSION, "session-1", None, failure)
+    if online:
+        client = AsyncBeamSearchClient(SimpleNamespace(engine_client=object()))
+        call = OnlineBeamSearchRequest([1, 2], "external", object())
+    else:
+        client = BeamSearchClient(SimpleNamespace(llm_engine=object()))
+        call = OfflineBeamSearchRequest([[1, 2]], object())
+
+    with pytest.raises(VLLMValidationError) as caught:
+        client.build_output(call, _request(), result)
+
+    assert str(caught.value) == "beam_width must equal 128"
 
 
 @pytest.mark.parametrize("operation", ["submit", "wait", "close"])  # type: ignore[misc]

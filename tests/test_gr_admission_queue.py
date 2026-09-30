@@ -19,6 +19,7 @@ from tests.test_async_scheduling_scheduler import receipt, release_receipt
 from tests.test_async_scheduling_scheduler import scheduler as _scheduler_fixture
 from tests.test_gr_async_scheduler import _batch_request
 from vllm_gr.v1.beam.batch_contracts import (
+    ADMISSION_REJECTED_CODE,
     BeamBatchOutput,
     BeamBatchResult,
     BeamOutputSequence,
@@ -82,6 +83,14 @@ def assert_one_error(core, name, client=3):
     assert output.outputs[0].request_id == name
     assert output.outputs[0].finish_reason is FinishReason.ERROR
     assert output.outputs[0].new_token_ids == []
+    # A bare error output says only that something went wrong, so the frontend
+    # can only report a server fault. The rejection is the request's answer and
+    # has to travel as the terminal result the session never produced.
+    rejection = output.outputs[0].kv_transfer_params["gr_batch_result"]
+    assert rejection.batch_id == name
+    assert rejection.output is None
+    assert rejection.failure.code == ADMISSION_REJECTED_CODE
+    assert rejection.failure.message.strip()
     assert core.output_queue.empty()
 
 

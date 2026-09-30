@@ -8,6 +8,7 @@ from __future__ import annotations
 import time
 from typing import Any
 
+from vllm.exceptions import VLLMValidationError
 from vllm.sampling_params import SamplingParams
 from vllm.utils import random_uuid
 from vllm.v1.engine import EngineCoreRequest
@@ -231,7 +232,11 @@ class BeamSearchInputProcessor:
     ) -> BeamBatchRequest:
         tokenizer = serving.input_processor.tokenizer
         if tokenizer is None:
-            raise BeamSearchRequestError("beam_search_v1 requires tokenizer initialization")
+            raise VLLMValidationError(
+                "beam_search_v1 requires tokenizer initialization",
+                parameter="skip_tokenizer_init",
+                value=True,
+            )
         sampling_params, begin_token_id, end_token_id = _create_request_params(
             call.params, tokenizer
         )

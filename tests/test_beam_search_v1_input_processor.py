@@ -10,6 +10,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 import torch
+from vllm.exceptions import VLLMValidationError
 from vllm.inputs import embeds_input, tokens_input
 from vllm.v1.engine.input_processor import InputProcessor
 from vllm.v1.engine.output_processor import OutputProcessor
@@ -180,6 +181,31 @@ def _prepare_request(
         _lora_request_to_seq=lambda lora, size: [lora],
     )
     return processor.process_offline_inputs(llm, OfflineBeamSearchRequest([prompt], params))
+
+
+def test_online_request_without_a_tokenizer_names_the_startup_flag() -> None:
+    """`skip_tokenizer_init` is a configuration answer, not an internal fault.
+
+    A token-less engine is the only way to reach this guard, and the parameter
+    reported is the one the legacy interface reports for the same cause.
+    """
+    engine = _make_engine()
+    processor = BeamSearchInputProcessor(engine)
+    serving = SimpleNamespace(input_processor=SimpleNamespace(tokenizer=None))
+
+    with pytest.raises(VLLMValidationError) as caught:
+        asyncio.run(
+            processor.process_online_inputs(
+                serving,
+                OnlineBeamSearchRequest(
+                    [1, 2],
+                    "request-1",
+                    BeamSearchParams(beam_width=2, max_tokens=3, ignore_eos=True),
+                ),
+            )
+        )
+
+    assert (caught.value.parameter, caught.value.value) == ("skip_tokenizer_init", True)
 
 
 @pytest.mark.parametrize("online", [False, True])  # type: ignore[misc]

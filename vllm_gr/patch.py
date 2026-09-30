@@ -88,15 +88,75 @@ def _validate_flat_logprobs_patch() -> str | None:
     )
 
 
-def _validate_openai_beam_search_patch() -> str | None:
+def _validate_beam_search_dispatch_patch() -> str | None:
     from vllm.entrypoints.openai.engine.serving import OpenAIServing
 
-    from vllm_gr.entrypoints.openai.serving_engine import beam_search
+    from vllm_gr.entrypoints.openai.beam_search_patch import beam_search_dispatch
 
     return _verified(
-        OpenAIServing.beam_search is beam_search,
-        "OpenAIServing.beam_search does not reference the GR implementation",
+        OpenAIServing.beam_search is beam_search_dispatch,
+        "OpenAIServing.beam_search does not reference the GR dispatcher",
     )
+
+
+def _validate_admission_rejection_patch() -> str | None:
+    from vllm.entrypoints.openai.engine.serving import OpenAIServing
+
+    from vllm_gr.entrypoints.openai.beam_search_patch import (
+        _ADMISSION_REJECTION_PATCH_MARKER,
+    )
+
+    return _verified(
+        getattr(
+            getattr(OpenAIServing, "_raise_if_error", None),
+            _ADMISSION_REJECTION_PATCH_MARKER,
+            False,
+        ),
+        "OpenAIServing._raise_if_error does not reference the GR admission-rejection wrapper",
+    )
+
+
+def _validate_client_request_id_patch() -> str | None:
+    """Verify the two sites that pair a caller's name with the engine's."""
+
+    from vllm.entrypoints.openai.engine.serving import OpenAIServing
+    from vllm.v1.engine.output_processor import OutputProcessor
+
+    from vllm_gr.entrypoints.openai.beam_search_patch import (
+        _CLIENT_REQUEST_ID_PATCH_MARKER,
+        _SUBMIT_REQUEST_ID_PATCH_MARKER,
+    )
+
+    return _verified(
+        getattr(
+            getattr(OpenAIServing, "_base_request_id", None),
+            _CLIENT_REQUEST_ID_PATCH_MARKER,
+            False,
+        ),
+        "OpenAIServing._base_request_id does not reference the GR client-request-id wrapper",
+    ) or _verified(
+        getattr(
+            getattr(OutputProcessor, "add_request", None),
+            _SUBMIT_REQUEST_ID_PATCH_MARKER,
+            False,
+        ),
+        "OutputProcessor.add_request does not reference the GR client-request-id wrapper",
+    )
+
+
+def _validate_openai_beam_search_patch() -> str | None:
+    """Verify every target mutated by the grouped OpenAI Beam installer."""
+
+    failures = tuple(
+        detail
+        for detail in (
+            _validate_beam_search_dispatch_patch(),
+            _validate_admission_rejection_patch(),
+            _validate_client_request_id_patch(),
+        )
+        if detail is not None
+    )
+    return "; ".join(failures) or None
 
 
 def _validate_chat_sampling_patch() -> str | None:
