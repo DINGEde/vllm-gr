@@ -14,7 +14,21 @@ logger = init_logger(__name__)
 
 PREFILL_GRAPH_BUCKET_STEP_DEFAULT = 128
 PREFILL_GRAPH_MAX_BUCKET_DEFAULT = 8192
-PREFILL_GRAPH_CAPTURE_NUM_REQS = (1, 4)
+# Request counts that receive a captured Prefill CUDA graph. Order matters and
+# the last entry is load-bearing: the runner sizes its block_table_buf from
+# [-1] and falls back to it as the default max_num_seqs, so a count is
+# inserted in ascending position, never appended past a larger one.
+#
+# 1 and 4 are the original footprint -- legacy per-request dispatch, and the
+# widest V1 batch the grid was sized for. 2 is added because a 2-wide V1
+# session is a supported configuration (SUPPORTED_NUM_REQS below admits it,
+# max_num_seqs admits it) that nonetheless had no graph, so every Prefill
+# silently took the eager fallback. The gap only showed on the
+# prefix-cache-hit path: a graphed 4-wide replay costs 11.1 ms where the eager
+# 2-wide one cost 41.7 ms, i.e. half the requests for 3.8x the time. A
+# full-length Prefill is GEMM-bound, so the cache-miss path is unaffected
+# either way. Batch sizes 3 and 5-8 stay uncaptured.
+PREFILL_GRAPH_CAPTURE_NUM_REQS = (1, 2, 4)
 # Small exact buckets, available as an opt-in extension of the configured
 # grid (see get_default_buckets). A prefix-cache hit schedules only the
 # uncached tail ((((N - 1) mod block_size) + 1) <= 16 tokens at block_size
