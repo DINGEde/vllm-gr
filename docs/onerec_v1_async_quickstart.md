@@ -182,6 +182,16 @@ completed work is not replayed. Cancellation cleans up the current session and
 prevents later submissions. Completed work cannot be rolled back. Independent
 HTTP requests are not coalesced, and other requests may run between sub-batches.
 
+Each claimed request emits an INFO-level `Beam batch plan` log with its request
+ID, input count, sub-batch count, and sizes. For example, `sizes=[1, 1, 1, 1]`
+makes singleton-only execution visible. This describes the plan, not successful
+execution, and does not log prompt contents or change the response schema.
+
+At the completions adapter boundary, cancellation during child execution returns
+the same `Client disconnected` error response as upstream vLLM 0.22.1 after
+iterator cleanup. It intentionally does not re-raise there; lower-level
+engine/client cancellation behavior is unchanged.
+
 Preserving order and generation budgets does not guarantee identical beam
 rankings to separate B=1 calls. GPU batch shapes and prefix-cache execution
 paths can produce different candidates or scores. Validate model quality for

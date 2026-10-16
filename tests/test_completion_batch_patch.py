@@ -7,6 +7,7 @@ from __future__ import annotations
 import asyncio
 from types import MethodType, SimpleNamespace
 from typing import Any
+from unittest.mock import Mock
 
 import pytest
 from vllm.entrypoints.openai.completion.serving import OpenAIServingCompletion
@@ -217,6 +218,39 @@ def test_a_batch_renders_once_and_submits_once(monkeypatch: pytest.MonkeyPatch) 
         "text-2",
         "text-3",
     ]
+
+
+@pytest.mark.parametrize(  # type: ignore[misc]
+    ("lengths", "seqs", "tokens", "sizes"),
+    [
+        ([10] * 4, 4, 40, [4]),
+        ([10] * 4, 1, 40, [1, 1, 1, 1]),
+        ([10, 11, 12, 13], 4, 100, [1, 1, 1, 1]),
+        ([10] * 4, 4, 20, [2, 2]),
+    ],
+)
+def test_batch_plan_is_logged(
+    monkeypatch: pytest.MonkeyPatch,
+    lengths: list[int],
+    seqs: int,
+    tokens: int,
+    sizes: list[int],
+) -> None:
+    serving = _batched_self(
+        monkeypatch, prompt_lengths=dict(enumerate(lengths)), max_num_batched_tokens=tokens
+    )
+    serving.engine_client.vllm_config.scheduler_config.max_num_seqs = seqs
+    info = Mock()
+    monkeypatch.setattr(patch_module.logger, "info", info)
+    request = _request(to_beam_search_params=lambda tokens, _: {})
+    assert asyncio.run(_create_completion_batched(serving, request, None, 4)) == "response-for-4"
+    info.assert_called_once_with(
+        "Beam batch plan request_id=%s prompts=%d sub_batches=%d sizes=%s",
+        "cmpl-request-0",
+        4,
+        len(sizes),
+        sizes,
+    )
 
 
 def _delegates_to_the_original(monkeypatch: pytest.MonkeyPatch) -> list[Any]:

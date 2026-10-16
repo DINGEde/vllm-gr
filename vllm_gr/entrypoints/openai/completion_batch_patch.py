@@ -22,6 +22,7 @@ from vllm.entrypoints.openai.engine.protocol import (
 )
 from vllm.entrypoints.utils import get_max_tokens
 from vllm.exceptions import VLLMValidationError
+from vllm.logger import init_logger
 from vllm.renderers.inputs.preprocess import prompt_to_seq
 
 from vllm_gr.config import BeamExecutionMode, GRConfig
@@ -37,6 +38,7 @@ if TYPE_CHECKING:
     from vllm.outputs import RequestOutput
 
 _COMPLETION_BATCH_PATCH_MARKER = "_vllm_gr_completion_batch_patch"
+logger = init_logger(__name__)
 
 # Filled in by ``patch_completion_batch``. Kept module-level so the wrapper has
 # exactly one referent: the function object the route resolved when it was
@@ -151,6 +153,13 @@ async def _create_completion_batched(
     ]
 
     request_id = f"cmpl-{self._base_request_id(raw_request, request.request_id)}"
+    logger.info(
+        "Beam batch plan request_id=%s prompts=%d sub_batches=%d sizes=%s",
+        request_id,
+        claimed,
+        len(plan),
+        [batch.stop - batch.start for batch in plan],
+    )
     created_time = int(time.time())
 
     request_metadata = RequestResponseMetadata(request_id=request_id)
@@ -196,6 +205,9 @@ async def _create_completion_batched(
                 )
             final_res_batch.extend(results)
     except asyncio.CancelledError:
+        # Match upstream non-streaming completions at the HTTP adapter boundary:
+        # iterator cleanup precedes this error response, not a successful result.
+        # Engine/client cancellation propagation remains unchanged.
         return self.create_error_response("Client disconnected")
 
     for index, final_res in enumerate(final_res_batch):

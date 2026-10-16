@@ -59,4 +59,7 @@ def plan_completion_batches(
             batches.append(CompletionBatch(start, stop, budget))
             start = stop
             break
+        else:
+            # Singleton validation guarantees progress; fail if that invariant breaks.
+            raise RuntimeError(f"Beam batch planner made no progress at prompt {start}")
     return tuple(batches)

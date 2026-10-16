@@ -3,6 +3,7 @@
 
 import pytest
 
+import vllm_gr.entrypoints.openai.completion_batch_plan as plan_module
 from vllm_gr.entrypoints.openai.completion_batch_plan import plan_completion_batches
 
 
@@ -76,4 +77,15 @@ def test_invalid_later_input_rejects_the_whole_plan(
             supported_sizes=(1, 2, 4),
             max_num_seqs=4,
             token_budget=40,
+        )
+
+
+def test_broken_progress_invariant_fails_instead_of_looping(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Inject a rejected sum after valid singletons passed prevalidation.
+    monkeypatch.setattr(plan_module, "sum", lambda _: 41, raising=False)
+    with pytest.raises(RuntimeError, match="made no progress at prompt 0"):
+        plan_completion_batches(
+            [10], [5], supported_sizes=(1, 2, 4), max_num_seqs=4, token_budget=40
         )
