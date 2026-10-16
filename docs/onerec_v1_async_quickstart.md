@@ -133,6 +133,90 @@ When changing the Beam width, also update the request, `beam.max_width`,
 Constraint Table `max_top_k`, and engine capacity. Do not change only the
 client `beam_width`.
 
+### Batching several prompts in one HTTP request
+
+The V1 completions route renders a prompt **list** once and partitions it into
+contiguous execution batches of 4, 2, or 1. Each batch runs one session; the
+next batch is submitted only after the previous call completes successfully.
+The engine retains one execution owner. For example:
+
+```bash
+curl -X POST http://localhost:8000/v1/completions \
+  -H "Content-Type: application/json" \
+  --data '{
+    "model": "OpenOneRec/OneRec-1.7B",
+    "prompt": ["<prompt 0>", "<prompt 1>", "<prompt 2>", "<prompt 3>"],
+    "use_beam_search": true,
+    "n": 128,
+    "temperature": 0.0,
+    "max_tokens": 5,
+    "vllm_xargs": {"begin_token": "<|sid_begin|>", "end_token": "<|sid_end|>"}
+  }'
+```
+
+Any nonempty list length can be submitted, subject to normal request limits.
+With compatible parameters and sufficient capacity, 3 prompts run as `2+1`,
+5 as `4+1`, 6 as `4+2`, and 8 as `4+4`. One prompt keeps the original route.
+The planner preserves input order; it does not reorder prompts to fill batches.
+
+Each execution batch must fit `max_num_seqs` and `max_num_batched_tokens`,
+including the begin token appended to every prompt. If configured, a smaller
+`max_num_scheduled_tokens` also limits the batch. Insufficient capacity causes
+smaller sub-batches, without rendering again. An individually oversized prompt
+is a request error, even if previous prompts would fit. Engine KV admission
+remains authoritative; the frontend plan does not guarantee device capacity.
+
+V1 requires Chunked Prefill to be **off**. Enabling it is refused when the engine
+starts (`beam_search_v1 requires enable_chunked_prefill=False`), not split:
+there is no partial Prefill on this path, and the complete prompt has to fit the
+token budget.
+
+A batch runs one `max_tokens`, so adjacent prompts with different effective
+generation budgets are split. No prompt's budget is reduced to match another.
+
+The response is a single object whose `choices` are flat-indexed prompt-major,
+so `k` prompts × `n` beams give `k × n` choices, and `usage.prompt_tokens` sums
+across the entire HTTP request. Results are assembled once after all sub-batches
+succeed. A failed sub-batch stops subsequent submissions and returns an error;
+completed work is not replayed. Cancellation cleans up the current session and
+prevents later submissions. Completed work cannot be rolled back. Independent
+HTTP requests are not coalesced, and other requests may run between sub-batches.
+
+Preserving order and generation budgets does not guarantee identical beam
+rankings to separate B=1 calls. GPU batch shapes and prefix-cache execution
+paths can produce different candidates or scores. Validate model quality for
+the batch sizes you deploy; the split/merge system test compares against manual
+partitions with matching batch shapes and cache conditions.
+
+#### Execution flow and ownership
+
+The HTTP list is a response boundary, not a GPU execution-batch boundary:
+
+```text
+one HTTP request: [p0, p1, p2, p3, p4, p5, p6, p7, p8]
+  -> render all inputs once; resolve each generation budget
+  -> validate individual inputs and plan contiguous batches
+  -> session [p0..p3] -> close -> session [p4..p7] -> close -> session [p8]
+  -> merge outputs in input order -> one CompletionResponse
+```
+
+At each input position, the planner chooses the largest supported batch that
+fits sequence/token capacity and has one shared generation budget. This is a
+greedy, order-preserving policy, not a global bin-packing optimizer. All lengths,
+budgets, and beam parameters are checked before submitting the first session;
+runtime resource admission and failures still belong to the engine.
+
+`GRExecutionCapacity.active_sessions` remains 1. Each session fixes its members
+before it starts, and the frontend waits for its iterator and cleanup before
+submitting the next one. No members join or leave a running batch. Single owner
+therefore does not mean that one HTTP request can contain only one batch, nor
+does it give the whole HTTP request exclusive ownership across all sub-batches.
+
+This behavior applies to multi-prompt, non-streaming V1 beam completions. Single
+prompts, non-beam requests, streaming, embedded prompts, and non-V1 engines keep
+the original handler. It is not cross-request coalescing or continuous batching,
+and it introduces no new endpoint or client-side batch-size requirement.
+
 ## 5. Validate and troubleshoot
 
 With real model weights, run the system test for actual offline and online V1
@@ -145,6 +229,10 @@ VLLM_GR_TEST_MODEL="$ONEREC_MODEL" \
 python -m pytest --run-slow -v -s tests/st/test_onerec_v1_scheduler_st.py
 ```
 
+For the completions route, run `tests/st/test_onerec_v1_completion_batch_st.py`
+with the same environment. It checks 3/5/6-prompt splitting, actual session
+dispatches, response ordering/usage, and cancellation followed by reuse.
+
 | Symptom | Resolution |
 | --- | --- |
 | `async_scheduling=True` is required | Use the V1 example and keep this `GRLLM` initialization option. |
@@ -153,6 +241,7 @@ python -m pytest --run-slow -v -s tests/st/test_onerec_v1_scheduler_st.py
 | CUDA graph or out-of-memory error | Start with width 128 and the default `--gpu-memory-utilization 0.5`; check for competing GPU processes. |
 | Online V1 validation is needed | The system test calls `OpenAIServing.beam_search_v1()` with a real asynchronous multiprocess engine. Legacy HTTP gates remain separate. |
 | EOS or Prefill admission error | Set `ignore_eos=True`, disable Chunked Prefill and allow the complete prompt in `max_num_batched_tokens`. |
+| A prompt list uses small execution batches | Check sequence/token capacity and equal effective generation budgets; all three constrain sub-batch size. |
 
 ## Further reading
 

@@ -214,7 +214,7 @@ def test_v1_startup_heap_keeps_dynamic_cycles_collectible_and_releases_owners() 
 
 def test_v1_async_flow_awaits_preparation_before_submitting_and_closes() -> None:
     frontend = AsyncMock(spec=AsyncBeamSearchFrontend)
-    call = OnlineBeamSearchRequest(prompt=[1, 2], request_id="request-0", params=object())
+    call = OnlineBeamSearchRequest(prompts=([1, 2],), request_id="request-0", params=object())
     request = cast(BeamBatchRequest, object())
     session = BeamSearchSession(batch_id="batch-0", session_id="batch-0", handle=request)
     result = cast(BeamBatchResult, object())
@@ -238,7 +238,7 @@ def test_v1_async_flow_awaits_preparation_before_submitting_and_closes() -> None
 )
 def test_v1_async_flow_closes_only_after_session_is_returned(failure_stage: str) -> None:
     frontend = AsyncMock(spec=AsyncBeamSearchFrontend)
-    call = OnlineBeamSearchRequest(prompt=[1, 2], request_id="request-0", params=object())
+    call = OnlineBeamSearchRequest(prompts=([1, 2],), request_id="request-0", params=object())
     session = BeamSearchSession(batch_id="batch-0", session_id="batch-0", handle=object())
     frontend.submit_once.return_value = session
     getattr(frontend, failure_stage).side_effect = RuntimeError("frontend failed")

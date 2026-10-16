@@ -216,10 +216,46 @@ def test_failure_and_invalid_boundary_preserve_error_contract() -> None:
 @pytest.mark.parametrize("include_stop", [False, True])  # type: ignore[misc]
 def test_online_output_boundary_is_unchanged(include_stop: bool) -> None:
     processor, call, request, result, _ = _case(include_stop=include_stop)
-    online = OnlineBeamSearchRequest(call.prompts[0], "external-id", call.params)
+    online = OnlineBeamSearchRequest((call.prompts[0],), "external-id", call.params)
     output = processor.process_online_outputs(online, request, result)[0]
     assert output.request_id == "external-id"
     assert output.prompt_token_ids == [1, 2]
     assert output.outputs[0].token_ids == [10, 3, 4, 20]
     assert output.outputs[1].token_ids == [10, 5] + ([20] if include_stop else [])
     assert output.outputs[0].text == "10|3|4|20"
+
+
+def test_online_outputs_are_one_per_prompt_in_batch_order() -> None:
+    """k prompts come back as k results, each carrying its own prompt.
+
+    All of them report under the caller's request id, and the engine's shared
+    session id must not leak into any of them.
+    """
+    processor, call, request, result, _ = _case()
+    second_native = copy.copy(request.items[0].request)
+    second_native.prompt_token_ids = [7, 8, 10]
+    second_native.cache_salt = "second"
+    request2 = BeamBatchRequest(
+        1,
+        "request-1",
+        (*request.items, BeamBatchItem(1, second_native)),
+        request.beam_params,
+        request.output_options,
+    )
+    first = result.output.items[0]
+    output = BeamBatchOutput((first, BeamRequestOutput(1, "request-1", first.sequences)))
+    online = OnlineBeamSearchRequest(
+        (call.prompts[0], {"prompt_token_ids": [7, 8], "prompt": "second-source"}),
+        "external-id",
+        call.params,
+    )
+
+    converted = processor.process_online_outputs(
+        online, request2, BeamBatchResult(1, "request-1", output, None)
+    )
+
+    assert [res.request_id for res in converted] == ["external-id"] * 2
+    assert [res.prompt_token_ids for res in converted] == [[1, 2], [7, 8]]
+    assert [res.prompt for res in converted] == ["source", "second-source"]
+    assert [res.outputs[0].token_ids for res in converted] == [[10, 3, 4, 20]] * 2
+    assert [res.lora_request for res in converted] == [request.items[0].request.lora_request] * 2

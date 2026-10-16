@@ -113,7 +113,7 @@ def test_online_request_preserves_native_external_id_routing(
             await processor.process_online_inputs(
                 serving,
                 OnlineBeamSearchRequest(
-                    prompt=[1, 2],
+                    prompts=([1, 2],),
                     request_id=request_id,
                     params=BeamSearchParams(beam_width=2, max_tokens=3, ignore_eos=True),
                 ),
@@ -149,7 +149,7 @@ def test_beam_metadata_uses_native_normalized_temperature(temperature: float) ->
     params = BeamSearchParams(beam_width=2, max_tokens=3, temperature=temperature, ignore_eos=True)
     request = asyncio.run(
         BeamSearchInputProcessor(engine).process_online_inputs(
-            serving, OnlineBeamSearchRequest([1, 2], "request-1", params)
+            serving, OnlineBeamSearchRequest(([1, 2],), "request-1", params)
         )
     )
     native_params = request.items[0].request.sampling_params
@@ -171,7 +171,7 @@ def _prepare_request(
         serving = SimpleNamespace(input_processor=SimpleNamespace(tokenizer=tokenizer))
         return asyncio.run(
             processor.process_online_inputs(
-                serving, OnlineBeamSearchRequest(prompt, "request-1", params)
+                serving, OnlineBeamSearchRequest((prompt,), "request-1", params)
             )
         )
     engine.get_supported_tasks = lambda: ("generate",)
@@ -198,7 +198,7 @@ def test_online_request_without_a_tokenizer_names_the_startup_flag() -> None:
             processor.process_online_inputs(
                 serving,
                 OnlineBeamSearchRequest(
-                    [1, 2],
+                    ([1, 2],),
                     "request-1",
                     BeamSearchParams(beam_width=2, max_tokens=3, ignore_eos=True),
                 ),
@@ -236,7 +236,7 @@ def test_public_result_keeps_the_accepted_boundary_ids(
             engine_client=engine, input_processor=SimpleNamespace(tokenizer=tokenizer)
         )
         client: Any = AsyncBeamSearchClient(serving)
-        call: Any = OnlineBeamSearchRequest([1, 2], "external-id", params)
+        call: Any = OnlineBeamSearchRequest(([1, 2],), "external-id", params)
         request = asyncio.run(client.prepare_request(call))
     else:
         engine.get_supported_tasks = lambda: ("generate",)
@@ -308,6 +308,59 @@ def test_offline_inputs_preserve_caller_formed_batch_order() -> None:
     ]
     assert request.batch_id == request.items[0].request.request_id
     assert request.items[1].request.request_id != request.batch_id
+
+
+@pytest.mark.parametrize("size", [2, 4])  # type: ignore[misc]
+def test_online_inputs_preserve_caller_formed_batch_order(size: int) -> None:
+    """A prompt list is one batch, ordered, sharing the caller's own name.
+
+    The engine runs the batch as one forward, so every member has to agree on
+    the batch it belongs to while keeping a distinct engine request to be
+    addressed by.
+    """
+    engine = _make_engine()
+    tokenizer = SimpleNamespace(eos_token_id=2, convert_tokens_to_ids=lambda token: None)
+    serving = SimpleNamespace(input_processor=SimpleNamespace(tokenizer=tokenizer))
+    prompts = tuple([10 * (index + 1), 10 * (index + 1) + 1] for index in range(size))
+
+    request = asyncio.run(
+        BeamSearchInputProcessor(engine).process_online_inputs(
+            serving,
+            OnlineBeamSearchRequest(
+                prompts=prompts,
+                request_id="client-request",
+                params=BeamSearchParams(beam_width=2, max_tokens=3, ignore_eos=True),
+            ),
+        )
+    )
+
+    assert len(request.items) == size
+    assert [item.item_index for item in request.items] == list(range(size))
+    assert [item.request.prompt_token_ids for item in request.items] == list(prompts)
+    assert request.batch_id == request.items[0].request.request_id
+    assert len({item.request.request_id for item in request.items}) == size
+    assert {item.request.external_req_id for item in request.items} == {"client-request"}
+    # One submission, so one task lookup and one arrival time for the batch.
+    engine.get_supported_tasks.assert_awaited_once()
+
+
+def test_online_inputs_reject_an_empty_prompt_list() -> None:
+    engine = _make_engine()
+    serving = SimpleNamespace(
+        input_processor=SimpleNamespace(tokenizer=SimpleNamespace(eos_token_id=2))
+    )
+
+    with pytest.raises(VLLMValidationError, match="at least one prompt"):
+        asyncio.run(
+            BeamSearchInputProcessor(engine).process_online_inputs(
+                serving,
+                OnlineBeamSearchRequest(
+                    prompts=(),
+                    request_id="client-request",
+                    params=BeamSearchParams(beam_width=2, max_tokens=3, ignore_eos=True),
+                ),
+            )
+        )
 
 
 def test_offline_inputs_reject_unsupported_batch_size_before_admission() -> None:

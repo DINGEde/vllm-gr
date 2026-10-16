@@ -119,7 +119,7 @@ def test_only_ignore_eos_is_rewritten() -> None:
     assert call.params.beam_width == BEAM_WIDTH
     assert call.params.max_tokens == MAX_TOKENS
     assert call.request_id == "request-id"
-    assert call.prompt == "prompt"
+    assert call.prompts == ("prompt",)
 
 
 def test_the_frontend_heap_is_frozen_once_the_engine_has_answered() -> None:

@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import asyncio
 import time
-from collections.abc import AsyncGenerator, Mapping
+from collections.abc import AsyncGenerator, Mapping, Sequence
 from copy import copy
 from typing import TYPE_CHECKING
 
@@ -14,6 +14,7 @@ from vllm.logger import init_logger
 from vllm.logprobs import FlatLogprobs
 from vllm.lora.request import LoRARequest
 from vllm.outputs import CompletionOutput, RequestOutput
+from vllm.renderers.inputs.preprocess import prompt_to_seq
 from vllm.sampling_params import BeamSearchParams, SamplingParams
 from vllm.utils import random_uuid
 
@@ -67,13 +68,16 @@ def create_online_beam_search_v1_client(self) -> "AsyncBeamSearchFrontend":
 @frontend_request_scope
 async def beam_search_v1(
     self,
-    prompt: EngineInput,
+    prompt: EngineInput | Sequence[EngineInput],
     request_id: str,
     params: BeamSearchParams,
     lora_request: LoRARequest | None = None,
     trace_headers: Mapping[str, str] | None = None,
 ) -> AsyncGenerator[RequestOutput, None]:
     """Submit one online V1 request and yield terminal outputs only.
+
+    ``prompt`` is a single input or a sequence of them; either way there is one
+    submit and one terminal output per input, in order.
 
     ``ignore_eos`` is not a client choice on this interface. V1 runs the whole
     beam group as one persistent session over a fixed budget, so a beam that
@@ -89,16 +93,20 @@ async def beam_search_v1(
     require_beam_execution_mode(
         getattr(self.engine_client, "vllm_config", None), BeamExecutionMode.V1
     )
-    if not isinstance(prompt, str) and prompt.get("type") == "enc_dec":
+    prompts = tuple(prompt_to_seq(prompt))
+    if not prompts:
+        raise VLLMValidationError("beam_search_v1 requires at least one prompt")
+    for candidate in prompts:
         # A session runs the one token stream its decoder owns, and the engine
         # refuses the multimodal features an encoder-decoder request arrives
         # with. The speech-to-text endpoints reach beam search through here,
         # so name what is missing instead of failing on a schema the caller
         # never sees.
-        raise NotImplementedError(
-            "beam search is not implemented for encoder-decoder inputs such as "
-            "speech-to-text requests"
-        )
+        if isinstance(candidate, Mapping) and candidate.get("type") == "enc_dec":
+            raise NotImplementedError(
+                "beam search is not implemented for encoder-decoder inputs such as "
+                "speech-to-text requests"
+            )
     from vllm_gr.entrypoints.beam_search_v1 import run_beam_search_v1_async
     from vllm_gr.entrypoints.beam_search_v1.protocol import OnlineBeamSearchRequest
 
@@ -109,7 +117,7 @@ async def beam_search_v1(
     rank = await _next_data_parallel_rank(self.engine_client)
 
     call = OnlineBeamSearchRequest(
-        prompt=prompt,
+        prompts=prompts,
         request_id=request_id,
         params=params,
         lora_request=lora_request,
