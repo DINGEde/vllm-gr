@@ -9,6 +9,7 @@ from functools import wraps
 import torch
 from vllm.logger import init_logger
 
+from vllm_gr.v1.beam.batch_contracts import SUPPORTED_BEAM_BATCH_SIZES
 from vllm_gr.v1.beam.beam_decision import maybe_run_worker_beam_decision
 from vllm_gr.v1.beam.execution_batch import (
     BeamBatchExecutionView,
@@ -96,8 +97,8 @@ def initialize_beam_postprocess_workspaces(
 ):
     """Prewarm the configured CUDA Beam postprocess bucket on ``runner``.
 
-    V1 reserves the largest supported logical batch so B=1/2/4 reuse the same
-    fixed-address state and selection storage.
+    V1 reserves the largest supported logical batch so every admitted size
+    reuses the same fixed-address state and selection storage.
     """
 
     device = torch.device(getattr(runner, "device", "cpu"))
@@ -118,7 +119,12 @@ def initialize_beam_postprocess_workspaces(
         return None
 
     context = getattr(runner, "_beam_context", None)
-    default_max_batch = 4 if gr_cfg.beam_execution_mode is BeamExecutionMode.V1 else 1
+    # The Beam context is created later, on the first admitted batch, with
+    # max_batch=max(SUPPORTED_BEAM_BATCH_SIZES); the workspace built here must
+    # match it or the stage runner rejects the session as incompatible.
+    default_max_batch = (
+        max(SUPPORTED_BEAM_BATCH_SIZES) if gr_cfg.beam_execution_mode is BeamExecutionMode.V1 else 1
+    )
     resolved_max_batch = (
         int(max_batch)
         if max_batch is not None

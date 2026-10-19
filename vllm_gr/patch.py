@@ -153,10 +153,26 @@ def _validate_openai_beam_search_patch() -> str | None:
             _validate_beam_search_dispatch_patch(),
             _validate_admission_rejection_patch(),
             _validate_client_request_id_patch(),
+            _validate_completion_batch_patch(),
         )
         if detail is not None
     )
     return "; ".join(failures) or None
+
+
+def _validate_completion_batch_patch() -> str | None:
+    """Verify the completions route still owns the batch seam.
+
+    The installer and its verifier are one responsibility and live together:
+    the list of upstream helpers the batch path borrows is long, and keeping a
+    second copy of it here is how the two drift apart.
+    """
+
+    from vllm_gr.entrypoints.openai.completion_batch_patch import (
+        _validate_completion_batch_patch as validate,
+    )
+
+    return validate()
 
 
 def _validate_chat_sampling_patch() -> str | None:

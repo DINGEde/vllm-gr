@@ -223,44 +223,47 @@ class BeamSearchOutputProcessor:
 
             from vllm.outputs import CompletionOutput, RequestOutput
 
-            item = output.items[0]
-            completion_token_ids = [
-                ([] if begin_token_id is None else [begin_token_id])
-                + _output_suffix(sequence, end_token_id)
-                for sequence in item.sequences
-            ]
-            texts = fast_batch_decode(self.tokenizer, completion_token_ids)
-            lora_request = request.items[0].request.lora_request
-            completions = [
-                CompletionOutput(
-                    index=index,
-                    text=text,
-                    token_ids=token_ids,
-                    cumulative_logprob=sequence.cumulative_logprob,
-                    logprobs=None,
-                    finish_reason=sequence.finish_reason,
-                    stop_reason=sequence.stop_token_id,
-                    lora_request=lora_request,
+            results = []
+            for item in output.items:
+                item_index = item.item_index
+                completion_token_ids = [
+                    ([] if begin_token_id is None else [begin_token_id])
+                    + _output_suffix(sequence, end_token_id)
+                    for sequence in item.sequences
+                ]
+                texts = fast_batch_decode(self.tokenizer, completion_token_ids)
+                lora_request = request.items[item_index].request.lora_request
+                completions = [
+                    CompletionOutput(
+                        index=choice_index,
+                        text=text,
+                        token_ids=token_ids,
+                        cumulative_logprob=sequence.cumulative_logprob,
+                        logprobs=None,
+                        finish_reason=sequence.finish_reason,
+                        stop_reason=sequence.stop_token_id,
+                        lora_request=lora_request,
+                    )
+                    for choice_index, (sequence, token_ids, text) in enumerate(
+                        zip(item.sequences, completion_token_ids, texts, strict=True)
+                    )
+                ]
+                prompt_token_ids = original[item_index]
+                prompt_text = _prompt_text(call.prompts[item_index])
+                if prompt_text is None:
+                    prompt_text = fast_decode(self.tokenizer, prompt_token_ids)
+                results.append(
+                    RequestOutput(
+                        request_id=call.request_id,
+                        prompt=prompt_text,
+                        prompt_token_ids=prompt_token_ids,
+                        prompt_logprobs=None,
+                        outputs=completions,
+                        finished=True,
+                        lora_request=lora_request,
+                    )
                 )
-                for index, (sequence, token_ids, text) in enumerate(
-                    zip(item.sequences, completion_token_ids, texts, strict=True)
-                )
-            ]
-            prompt_token_ids = original[0]
-            prompt_text = _prompt_text(call.prompt)
-            if prompt_text is None:
-                prompt_text = fast_decode(self.tokenizer, prompt_token_ids)
-            return [
-                RequestOutput(
-                    request_id=call.request_id,
-                    prompt=prompt_text,
-                    prompt_token_ids=prompt_token_ids,
-                    prompt_logprobs=None,
-                    outputs=completions,
-                    finished=True,
-                    lora_request=lora_request,
-                )
-            ]
+            return results
         except BeamSearchEngineError:
             raise
         except Exception as exc:

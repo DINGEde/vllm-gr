@@ -45,7 +45,7 @@ def _metadata(
     )
 
 
-@pytest.mark.parametrize("batch_size", [1, 2, 4])  # type: ignore[misc]
+@pytest.mark.parametrize("batch_size", range(1, 9))  # type: ignore[misc]
 def test_prefill_maps_one_row_per_request(batch_size: int) -> None:
     view = BeamBatchExecutionView.from_stage_metadata(_metadata(batch_size=batch_size))
 
@@ -56,7 +56,7 @@ def test_prefill_maps_one_row_per_request(batch_size: int) -> None:
     assert view.expand_per_request(tuple(range(batch_size))) == tuple(range(batch_size))
 
 
-@pytest.mark.parametrize("batch_size", [1, 2, 4])  # type: ignore[misc]
+@pytest.mark.parametrize("batch_size", range(1, 9))  # type: ignore[misc]
 def test_decode_maps_request_major_b_times_w_rows(batch_size: int) -> None:
     view = BeamBatchExecutionView.from_stage_metadata(
         _metadata(batch_size=batch_size, beam_width=3, kind="decode")

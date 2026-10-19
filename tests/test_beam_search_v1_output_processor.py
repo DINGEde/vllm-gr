@@ -216,7 +216,7 @@ def test_failure_and_invalid_boundary_preserve_error_contract() -> None:
 @pytest.mark.parametrize("include_stop", [False, True])  # type: ignore[misc]
 def test_online_output_boundary_is_unchanged(include_stop: bool) -> None:
     processor, call, request, result, _ = _case(include_stop=include_stop)
-    online = OnlineBeamSearchRequest(call.prompts[0], "external-id", call.params)
+    online = OnlineBeamSearchRequest((call.prompts[0],), "external-id", call.params)
     output = processor.process_online_outputs(online, request, result)[0]
     assert output.request_id == "external-id"
     assert output.prompt_token_ids == [1, 2]

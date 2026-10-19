@@ -27,8 +27,10 @@ PREFILL_GRAPH_MAX_BUCKET_DEFAULT = 8192
 # prefix-cache-hit path: a graphed 4-wide replay costs 11.1 ms where the eager
 # 2-wide one cost 41.7 ms, i.e. half the requests for 3.8x the time. A
 # full-length Prefill is GEMM-bound, so the cache-miss path is unaffected
-# either way. Batch sizes 3 and 5-8 stay uncaptured.
-PREFILL_GRAPH_CAPTURE_NUM_REQS = (1, 2, 4)
+# either way. 6 and 8 cover the wider V1 sessions admitted by
+# SUPPORTED_BEAM_BATCH_SIZES and would otherwise repeat the same silent eager
+# fallback. Batch sizes 3, 5 and 7 stay uncaptured.
+PREFILL_GRAPH_CAPTURE_NUM_REQS = (1, 2, 4, 6, 8)
 # Small exact buckets, available as an opt-in extension of the configured
 # grid (see get_default_buckets). A prefix-cache hit schedules only the
 # uncached tail ((((N - 1) mod block_size) + 1) <= 16 tokens at block_size

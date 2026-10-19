@@ -67,6 +67,9 @@ class OneRecV1STWorkerExtension:
             return {
                 "session_id": m.session_id,
                 "stage": m.stage_index,
+                # How many requests share this stage. One is the shape every
+                # other case here runs; a batch route is the one that forms more.
+                "size": len(m.request_ids),
                 "scheduled": args[0].num_scheduled_tokens[m.session_id],
             }
 
@@ -433,6 +436,139 @@ async def _run_online(work_dir: Path) -> None:
         )
 
 
+async def _run_online_completion_batch(work_dir: Path) -> None:
+    """Drive a prompt list through the completions HTTP route.
+
+    The route is the whole point: the same list posted here used to become one
+    session per prompt. The assertions are on what the engine was actually
+    asked to run, read off the existing stage probe, not on the response alone
+    -- a single response object is what both shapes return.
+    """
+    import httpx
+    from fastapi import FastAPI
+    from vllm.engine.arg_utils import AsyncEngineArgs
+    from vllm.entrypoints.openai.api_server import (
+        build_async_engine_client_from_engine_args,
+    )
+    from vllm.entrypoints.openai.completion.api_router import attach_router
+    from vllm.entrypoints.openai.completion.serving import OpenAIServingCompletion
+    from vllm.entrypoints.openai.models.serving import (
+        BaseModelPath,
+        OpenAIServingModels,
+    )
+    from vllm.entrypoints.serve.render.serving import OpenAIServingRender
+
+    from vllm_gr.plugin import initialize_runtime
+
+    initialize_runtime()
+    model, tokenizer, config, source, newline, _legal = _inputs(work_dir)
+    # Capacity only: the same engine configuration as the cases above, sized so
+    # that a four-prompt list can be resident at once.
+    kwargs = _engine_kwargs(model, config) | dict(max_num_seqs=4, max_num_batched_tokens=4096)
+    args = AsyncEngineArgs(additional_config={"vllm_gr": config}, **kwargs)
+    async with build_async_engine_client_from_engine_args(args) as engine:
+        models = OpenAIServingModels(
+            engine_client=engine,
+            base_model_paths=[BaseModelPath(name=model, model_path=model)],
+            lora_modules=None,
+        )
+        serving = OpenAIServingCompletion(
+            engine_client=engine,
+            models=models,
+            openai_serving_render=OpenAIServingRender(
+                model_config=engine.model_config,
+                renderer=engine.renderer,
+                model_registry=models.registry,
+                request_logger=None,
+                chat_template=None,
+                chat_template_content_format="auto",
+            ),
+            request_logger=None,
+        )
+        await engine.collective_rpc("onerec_v1_st_observe")
+        app = FastAPI()
+        app.state.openai_serving_completion = serving
+        attach_router(app)
+        prompts = [
+            tokenizer.encode(f"slot {i}", add_special_tokens=False)
+            + newline * (i * 16)
+            + source[-256:]
+            for i in range(4)
+        ]
+        body = {
+            "model": model,
+            "use_beam_search": True,
+            "n": _BEAM_WIDTH,
+            "temperature": 0.0,
+            "max_tokens": 5,
+            "return_token_ids": True,
+            "vllm_xargs": {"begin_token": "<|sid_begin|>", "end_token": "<|sid_end|>"},
+        }
+
+        async def stages_since(before: int) -> list[dict[str, Any]]:
+            events = (await engine.collective_rpc("onerec_v1_st_events"))[0][before:]
+            return [e for e in events if e["method"] == "execute"]
+
+        rows = []
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://test"
+        ) as client:
+            # A size this route forms runs as one session holding every prompt.
+            for count in (2, 4):
+                assert await engine.reset_prefix_cache()
+                before = len((await engine.collective_rpc("onerec_v1_st_events"))[0])
+                response = await client.post(
+                    "/v1/completions", json={**body, "prompt": prompts[:count]}
+                )
+                assert response.status_code == 200, response.text
+                data = response.json()
+                assert len(data["choices"]) == count * _BEAM_WIDTH
+                assert [c["index"] for c in data["choices"]] == list(range(count * _BEAM_WIDTH))
+                assert data["usage"]["prompt_tokens"] == sum(map(len, prompts[:count]))
+                assert data["usage"]["completion_tokens"] == count * _BEAM_WIDTH * 5
+                stages = await stages_since(before)
+                assert [e["size"] for e in stages if e["stage"] == 0] == [count]
+                assert len({e["session_id"] for e in stages}) == 1
+                snapshot = (await engine.collective_rpc("onerec_v1_st_snapshot"))[0]
+                assert snapshot["retired"] and snapshot["registry_size"] == 0
+                assert not snapshot["active_sessions"]
+                assert not engine.output_processor.has_unfinished_requests()
+                rows.append(dict(count=count, sessions=1, size=count, usage=data["usage"]))
+        (work_dir / "completion-batch-evidence.json").write_text(json.dumps(rows, indent=2))
+
+
+@pytest.mark.slow
+@pytest.mark.timeout(660)
+def test_onerec_v1_completion_batch_online(tmp_path: Path) -> None:
+    import torch
+
+    if not torch.cuda.is_available():
+        pytest.skip("OneRec completion batching ST requires CUDA")
+    env = dict(os.environ)
+    env.update(
+        USE_TF="0",
+        VLLM_USE_V2_MODEL_RUNNER="0",
+        VLLM_ENABLE_V1_MULTIPROCESSING="1",
+        VLLM_WORKER_MULTIPROC_METHOD="spawn",
+    )
+    command = [
+        sys.executable,
+        "-m",
+        "tests.st.test_onerec_v1_scheduler_st",
+        str(tmp_path),
+        "--completion-batch",
+    ]
+    with subprocess.Popen(
+        command, cwd=Path(__file__).parents[2], env=env, start_new_session=True
+    ) as process:
+        try:
+            assert process.wait(timeout=600) == 0, "OneRec completion batch subprocess failed"
+        finally:
+            if process.poll() is None:
+                os.killpg(process.pid, signal.SIGKILL)
+                process.wait()
+
+
 @pytest.mark.slow
 @pytest.mark.timeout(660)
 @pytest.mark.parametrize("online", [False, True])
@@ -465,7 +601,9 @@ def test_onerec_v1_async_scheduling(tmp_path: Path, online: bool) -> None:
 
 
 if __name__ == "__main__":
-    if "--online" in sys.argv:
+    if "--completion-batch" in sys.argv:
+        asyncio.run(_run_online_completion_batch(Path(sys.argv[1])))
+    elif "--online" in sys.argv:
         asyncio.run(_run_online(Path(sys.argv[1])))
     else:
         _run_onerec_v1_scheduler(Path(sys.argv[1]))

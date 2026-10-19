@@ -316,7 +316,9 @@ def run(args: argparse.Namespace, artifact_path: Path) -> None:
         enable_prefix_caching=True,
         enable_chunked_prefill=False,
         max_model_len=args.max_model_len,
-        max_num_batched_tokens=max(args.max_model_len, args.batch_size * args.input_len),
+        # The V1 input processor appends the begin token to every prompt, so a
+        # B-wide Prefill schedules B * (input_len + 1) tokens, not B * input_len.
+        max_num_batched_tokens=max(args.max_model_len, args.batch_size * (args.input_len + 1)),
         max_num_seqs=max(args.beam_width, args.batch_size),
         max_logprobs=args.beam_width,
         gpu_memory_utilization=args.gpu_memory_utilization,
