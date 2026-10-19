@@ -13,6 +13,7 @@ from vllm_gr.config.models import (
     CONSTRAINT_TABLE_FORMAT,
     GR_CONFIG_SCHEMA_VERSION,
     MAX_BEAM_WIDTH,
+    SUPPORTED_BEAM_BATCH_SIZES,
     BeamExecutionMode,
     ConstraintBackend,
     ConstraintTableBackendEnum,
@@ -30,6 +31,22 @@ def validate_beam_execution_mode(value: object) -> BeamExecutionMode:
         except ValueError:
             pass
     raise ValueError("vllm-gr beam.execution_mode must be 'legacy' or 'v1'")
+
+
+def validate_beam_online_batch_sizes(value: object) -> tuple[int, ...]:
+    """Require explicit engine-supported sizes and singleton fallback."""
+    if (
+        not isinstance(value, (list, tuple))
+        or not value
+        or any(type(size) is not int or size not in SUPPORTED_BEAM_BATCH_SIZES for size in value)
+    ):
+        raise ValueError(
+            "vllm-gr beam.online_batch_sizes must be a nonempty list of integers "
+            f"from {SUPPORTED_BEAM_BATCH_SIZES}"
+        )
+    if 1 not in value or len(set(value)) != len(value):
+        raise ValueError("vllm-gr beam.online_batch_sizes must include 1 and contain no duplicates")
+    return tuple(sorted(value))
 
 
 def validate_schema_version(value: object) -> int:

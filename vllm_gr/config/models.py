@@ -166,6 +166,8 @@ class GRConfig:
     # signature dimension, not a scheduler capacity: other B values do not use
     # the Beam FULL graph (native PIECEWISE/NONE dispatch remains available).
     beam_graph_batch_size: int = 1
+    # Online packing policy, not engine capacity or graph capture shapes.
+    beam_online_batch_sizes: tuple[int, ...] = DEFAULT_ONLINE_BATCH_SIZES
 
     def __post_init__(self) -> None:
         from vllm_gr.config.validation import (
@@ -176,6 +178,7 @@ class GRConfig:
             validate_beam_graph_enabled,
             validate_beam_max_decode_steps,
             validate_beam_max_width,
+            validate_beam_online_batch_sizes,
             validate_beam_worker_decision,
             validate_catalog_path,
             validate_constraint_backend,
@@ -211,6 +214,11 @@ class GRConfig:
             validate_beam_graph_batch_size(self.beam_graph_batch_size),
         )
         object.__setattr__(self, "beam_max_width", validate_beam_max_width(self.beam_max_width))
+        object.__setattr__(
+            self,
+            "beam_online_batch_sizes",
+            validate_beam_online_batch_sizes(self.beam_online_batch_sizes),
+        )
         object.__setattr__(
             self,
             "beam_max_decode_steps",
