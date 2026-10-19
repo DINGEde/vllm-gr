@@ -1,18 +1,21 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-"""Run a prompt list as one fixed-size beam batch on the completions route.
+"""Split a prompt list into contiguous beam batches served by one HTTP request.
 
 The completions route expands a prompt list into one engine request per prompt,
 so k prompts become k beam sessions the engine runs one after another, even
 though the V1 engine runs the members of one logical batch in a single forward.
+This module renders the list once and then runs the largest legal batches in
+the configured online policy, one after another, under the caller's request id.
 
-This module claims that case for the batch sizes the engine supports. Every
-other request -- non-beam, streaming, embedded prompts, a single prompt, an
-unsupported count, insufficient capacity, mismatched budgets, a LEGACY engine --
-delegates to the original handler. Each such decline is logged with its reason,
-because a list that did not batch is otherwise indistinguishable from one that
-did: the response shape is identical either way.
+A request this route does not exist to serve -- non-beam, streaming, embedded
+prompts, a single prompt, a LEGACY engine -- delegates to the original handler.
+The decision is taken from the request alone, before the render, so a delegated
+request is never rendered twice. The plan is logged whatever it turns out to be,
+including a plan of all-singletons, because a list that ran unbatched is
+otherwise indistinguishable from one that did not: the response shape is
+identical either way.
 """
 
 from __future__ import annotations
@@ -28,11 +31,15 @@ from vllm.entrypoints.openai.engine.protocol import (
     RequestResponseMetadata,
 )
 from vllm.entrypoints.utils import get_max_tokens
+from vllm.exceptions import VLLMValidationError
 from vllm.renderers.inputs.preprocess import prompt_to_seq
 
-from vllm_gr.config import DEFAULT_ONLINE_BATCH_SIZES, BeamExecutionMode, GRConfig
+from vllm_gr.config import BeamExecutionMode, GRConfig
+from vllm_gr.entrypoints.openai.completion_batch_plan import (
+    CompletionBatch,
+    plan_completion_batches,
+)
 from vllm_gr.logger import init_logger
-from vllm_gr.v1.beam.batch_contracts import SUPPORTED_BEAM_BATCH_SIZES
 
 if TYPE_CHECKING:
     from fastapi import Request
@@ -42,11 +49,6 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 _COMPLETION_BATCH_PATCH_MARKER = "_vllm_gr_completion_batch_patch"
-
-# The sizes this route forms itself. A single prompt is not a batch: it is one
-# session either way, so it keeps running the upstream body rather than an
-# equivalent copy of it.
-_FIXED_BATCH_SIZES = tuple(size for size in DEFAULT_ONLINE_BATCH_SIZES if size > 1)
 
 # Filled in by ``patch_completion_batch``. Kept module-level so the wrapper has
 # exactly one referent: the function object the route resolved when it was
@@ -60,9 +62,8 @@ def _batch_size(serving, request: CompletionRequest) -> int | None:
     None is the common answer: delegating is how this patch stays inert on
     every request it does not exist to serve, so each condition below is a
     reason to run the upstream body rather than an error to report. The gates
-    need nothing but the request, so they run before the renderer. A count
-    above one comes back even when this route cannot form it, so the route can
-    still say why it declined.
+    need nothing but the request, so they run before the renderer, which is the
+    expensive step this patch exists to do once instead of once per prompt.
     """
     if not request.use_beam_search or request.stream:
         return None
@@ -103,22 +104,6 @@ def _reserved_prompt_tokens(request: CompletionRequest) -> int:
     return 1 if extra_args.get("begin_token") is not None else 0
 
 
-def _effective_budgets(serving, request: CompletionRequest, engine_inputs: list) -> list[int]:
-    """Resolve each input's generation budget the way the upstream body does."""
-    max_model_len = serving.model_config.max_model_len
-    return [
-        get_max_tokens(
-            max_model_len,
-            request.max_tokens,
-            serving._extract_prompt_len(engine_input),
-            serving.default_sampling_params,
-            serving.override_max_tokens,
-            truncate_prompt_tokens=request.truncate_prompt_tokens,
-        )
-        for engine_input in engine_inputs
-    ]
-
-
 def _output_boundary_tokens(request: CompletionRequest) -> int:
     """Public budget positions the engine produces outside the Decode steps.
 
@@ -154,40 +139,58 @@ def _decode_batch_capacity(serving, request: CompletionRequest) -> int | None:
     return config.scheduler_config.max_num_batched_tokens // width
 
 
-def _batch_decline_reason(
-    serving, request: CompletionRequest, engine_inputs: list, budgets: list[int]
-) -> str | None:
-    """Why this rendered list cannot run as one session, or None if it can.
+def _completion_batch_plan(
+    serving, request: CompletionRequest, engine_inputs: list
+) -> tuple[CompletionBatch, ...]:
+    """Resolve every budget and partition the list before any session runs.
 
-    All conditions are checked before the first session is submitted, so a
-    list that cannot batch never runs partially.
+    Budgets stay per input: a sub-batch carries the budget of the prompts it
+    holds, so no prompt is silently shortened to match a neighbour. The plan is
+    complete before the first submission, so an input the engine would reject
+    cannot leave earlier prompts computed but unanswered.
     """
-    if len(set(budgets)) != 1:
-        # One session runs one budget. Reducing every prompt to the smallest
-        # would silently shorten the generation the caller asked for.
-        return f"generation budgets differ across prompts: {budgets}"
-    scheduler = serving.engine_client.vllm_config.scheduler_config
+    max_model_len = serving.model_config.max_model_len
+    lengths = [
+        serving._extract_prompt_len(engine_input) + _reserved_prompt_tokens(request)
+        for engine_input in engine_inputs
+    ]
+    budgets = [
+        get_max_tokens(
+            max_model_len,
+            request.max_tokens,
+            serving._extract_prompt_len(engine_input),
+            serving.default_sampling_params,
+            serving.override_max_tokens,
+            truncate_prompt_tokens=request.truncate_prompt_tokens,
+        )
+        for engine_input in engine_inputs
+    ]
+    vllm_config = serving.engine_client.vllm_config
+    sizes = GRConfig.from_vllm_config(vllm_config).beam_online_batch_sizes
+    scheduler = vllm_config.scheduler_config
     token_budget = scheduler.max_num_batched_tokens
     scheduled_limit = getattr(scheduler, "max_num_scheduled_tokens", None)
     if scheduled_limit is not None:
         token_budget = min(token_budget, scheduled_limit)
-    reserved = _reserved_prompt_tokens(request)
-    total = sum(
-        serving._extract_prompt_len(engine_input) + reserved for engine_input in engine_inputs
-    )
-    if total > token_budget:
-        return f"Prefill tokens {total} exceed the scheduling budget {token_budget}"
+    max_num_seqs = getattr(scheduler, "max_num_seqs", max(sizes))
     decode_capacity = _decode_batch_capacity(serving, request)
-    if (
-        _needs_decode_stage(request, budgets[0])
-        and decode_capacity is not None
-        and len(engine_inputs) > decode_capacity
+    if decode_capacity is not None and any(
+        _needs_decode_stage(request, budget) for budget in budgets
     ):
-        return (
-            f"NPU Decode batch size {len(engine_inputs)} exceeds the physical input "
-            f"capacity of {decode_capacity} prompts at the requested beam width"
+        # One logical batch occupies B*W native Decode rows on NPU. Cap each
+        # session instead of declining the whole list, so the planner can still
+        # split it into legal sub-batches.
+        max_num_seqs = max(1, min(max_num_seqs, decode_capacity))
+    try:
+        return plan_completion_batches(
+            lengths,
+            budgets,
+            supported_sizes=sizes,
+            max_num_seqs=max_num_seqs,
+            token_budget=token_budget,
         )
-    return None
+    except ValueError as exc:
+        raise VLLMValidationError(str(exc)) from exc
 
 
 async def _create_completion_batched(
@@ -195,15 +198,25 @@ async def _create_completion_batched(
     request: CompletionRequest,
     raw_request: Request | None,
     engine_inputs: list,
-    max_tokens: int,
+    plan: tuple[CompletionBatch, ...],
 ) -> object:
-    """Run one session holding every input and convert the result once."""
-    batch_params = request.to_beam_search_params(max_tokens, self.default_sampling_params)
+    """Run a complete plan serially, preserving one response per HTTP request.
+
+    Sessions do not overlap: each finishes -- iterator closed, engine slot
+    released -- before the next is submitted, so the engine still owns one
+    session at a time and the caller still gets one response.
+    """
+    batch_params = [
+        request.to_beam_search_params(batch.max_tokens, self.default_sampling_params)
+        for batch in plan
+    ]
     request_id = f"cmpl-{self._base_request_id(raw_request, request.request_id)}"
     logger.info(
-        "Beam batch session request_id=%s prompts=%d",
+        "Beam batch plan request_id=%s prompts=%d sub_batches=%d sizes=%s",
         request_id,
         len(engine_inputs),
+        len(plan),
+        [batch.stop - batch.start for batch in plan],
     )
     created_time = int(time.time())
 
@@ -216,36 +229,47 @@ async def _create_completion_batched(
     trace_headers = (
         None if raw_request is None else await self._get_trace_headers(raw_request.headers)
     )
-    for index, engine_input in enumerate(engine_inputs):
-        self._log_inputs(
-            f"{request_id}-{index}",
-            engine_input,
-            params=batch_params,
-            lora_request=lora_request,
-        )
-    # One logical batch runs under the request id the caller already sees, so
-    # the single-session case keeps the identifiers it had before this patch.
-    generator = self.beam_search(
-        prompt=engine_inputs,
-        request_id=request_id,
-        params=batch_params,
-        lora_request=lora_request,
-        trace_headers=trace_headers,
-    )
+    final_res_batch: list[RequestOutput] = []
     try:
-        async with aclosing(generator):
-            final_res_batch: list[RequestOutput] = [res async for res in generator]
+        for batch_index, (batch, params) in enumerate(zip(plan, batch_params, strict=True)):
+            # Yield so a cancellation that arrived while the previous iterator
+            # was closing is delivered before the next session is submitted.
+            # The HTTP route's with_cancellation wrapper owns the disconnect
+            # listener; this must not compete for ASGI receive messages.
+            await asyncio.sleep(0)
+            for index in range(batch.start, batch.stop):
+                self._log_inputs(
+                    f"{request_id}-{index}",
+                    engine_inputs[index],
+                    params=params,
+                    lora_request=lora_request,
+                )
+            # A one-session plan keeps the identifier the caller already sees;
+            # a split list names each session so the engine's logs, the
+            # frontend's, and any cancellation can be traced to one of them.
+            child_id = request_id if len(plan) == 1 else f"{request_id}-batch-{batch_index}"
+            generator = self.beam_search(
+                prompt=engine_inputs[batch.start : batch.stop],
+                request_id=child_id,
+                params=params,
+                lora_request=lora_request,
+                trace_headers=trace_headers,
+            )
+            async with aclosing(generator):
+                results = [res async for res in generator]
+            expected = batch.stop - batch.start
+            if len(results) != expected:
+                return _internal_error_response(
+                    self,
+                    f"beam batch {batch_index} returned {len(results)} outputs for {expected} prompts",
+                )
+            final_res_batch.extend(results)
     except asyncio.CancelledError:
         # Match upstream non-streaming completions at the HTTP adapter boundary:
         # iterator cleanup precedes this error response, not a successful result.
         # Engine/client cancellation propagation remains unchanged.
         return self.create_error_response("Client disconnected")
 
-    expected = len(engine_inputs)
-    if len(final_res_batch) != expected:
-        return _internal_error_response(
-            self, f"beam session returned {len(final_res_batch)} outputs for {expected} prompts"
-        )
     for index, final_res in enumerate(final_res_batch):
         if final_res.prompt is None:
             final_res.prompt = self._extract_prompt_text(engine_inputs[index])
@@ -261,19 +285,6 @@ async def _create_completion_batched(
     )
 
 
-async def _decline(
-    serving, request: CompletionRequest, raw_request: Request | None, count: int, reason: str
-) -> object:
-    """Run the original handler and record why this list was not batched."""
-    logger.info(
-        "Beam batch declined request_id=%s prompts=%d reason=%s",
-        request.request_id,
-        count,
-        reason,
-    )
-    return await _original_create_completion(serving, request, raw_request)
-
-
 async def create_completion_batch_dispatch(
     self, request: CompletionRequest, raw_request: Request | None = None
 ) -> object:
@@ -281,46 +292,25 @@ async def create_completion_batch_dispatch(
     count = _batch_size(self, request)
     if count is None:
         return await _original_create_completion(self, request, raw_request)
-    if count not in _FIXED_BATCH_SIZES:
-        return await _decline(
-            self,
-            request,
-            raw_request,
-            count,
-            f"prompt count {count} is not one of the supported fixed batch sizes "
-            f"{list(_FIXED_BATCH_SIZES)}",
-        )
 
     result = await self.render_completion_request(request)
     if isinstance(result, ErrorResponse):
         return result
     engine_inputs = result
     if len(engine_inputs) != count:
-        # Everything below -- one session and one output per prompt -- rests on
-        # the renderer agreeing with the count taken off the request.
+        # Everything below -- the partition and one output per prompt -- rests
+        # on the renderer agreeing with the count taken off the request.
         return _internal_error_response(
             self, f"render produced {len(engine_inputs)} inputs for {count} prompts"
         )
 
-    scheduler = self.engine_client.vllm_config.scheduler_config
-    max_num_seqs = getattr(scheduler, "max_num_seqs", max(SUPPORTED_BEAM_BATCH_SIZES))
-    if count > max_num_seqs:
-        return await _decline(
-            self,
-            request,
-            raw_request,
-            count,
-            f"prompt count {count} exceeds the sequence capacity {max_num_seqs}",
-        )
-
-    budgets = _effective_budgets(self, request, engine_inputs)
-    reason = _batch_decline_reason(self, request, engine_inputs, budgets)
-    if reason is not None:
-        # Delegating re-renders. Trading that for a simpler single-session
-        # route is deliberate here; the split planner is a separate change.
-        return await _decline(self, request, raw_request, count, reason)
-
-    return await _create_completion_batched(self, request, raw_request, engine_inputs, budgets[0])
+    plan = _completion_batch_plan(self, request, engine_inputs)
+    # A plan whose batches all hold one prompt is not a failure: it is the
+    # answer for a list whose prompts agree on nothing the plan can join. It
+    # runs here rather than delegating, because delegating would render the
+    # list a second time to reach the same sessions. The plan log below names
+    # the sizes either way, so a list that ran unbatched is visible in it.
+    return await _create_completion_batched(self, request, raw_request, engine_inputs, plan)
 
 
 def patch_completion_batch() -> None:

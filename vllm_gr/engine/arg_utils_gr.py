@@ -584,6 +584,8 @@ def create_engine_config(self, usage_context=None, headless=False):
             beam_graph_enabled=(
                 existing_gr_config.beam_graph_enabled and not getattr(self, "no_beam_graph", False)
             ),
+            beam_graph_batch_size=existing_gr_config.beam_graph_batch_size,
+            beam_online_batch_sizes=existing_gr_config.beam_online_batch_sizes,
             beam_max_width=(
                 getattr(self, "beam_max_width", None)
                 if getattr(self, "beam_max_width", None) is not None

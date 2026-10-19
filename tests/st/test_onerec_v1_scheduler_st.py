@@ -18,6 +18,7 @@ import signal
 import subprocess
 import sys
 import time
+from contextlib import suppress
 from itertools import product
 from pathlib import Path
 from typing import Any
@@ -442,12 +443,14 @@ async def _run_online(work_dir: Path) -> None:
 
 
 async def _run_online_completion_batch(work_dir: Path) -> None:
-    """Drive a prompt list through the completions HTTP route.
+    """Drive prompt lists of every length through the completions HTTP route.
 
     The route is the whole point: the same list posted here used to become one
     session per prompt. The assertions are on what the engine was actually
     asked to run, read off the existing stage probe, not on the response alone
-    -- a single response object is what both shapes return.
+    -- a single response object is what both shapes return. The same prompts
+    posted on their own are the control for the split, and a list cancelled
+    mid-flight is the control for the cleanup.
     """
     import httpx
     from fastapi import FastAPI
@@ -494,11 +497,13 @@ async def _run_online_completion_batch(work_dir: Path) -> None:
         app = FastAPI()
         app.state.openai_serving_completion = serving
         attach_router(app)
+        # Six, so every list length the cases below post is a real slice rather
+        # than a silent truncation of a shorter one.
         prompts = [
             tokenizer.encode(f"slot {i}", add_special_tokens=False)
             + newline * (i * 16)
             + source[-256:]
-            for i in range(4)
+            for i in range(6)
         ]
         body = {
             "model": model,
@@ -515,30 +520,93 @@ async def _run_online_completion_batch(work_dir: Path) -> None:
             return [e for e in events if e["method"] == "execute"]
 
         rows = []
+
+        async def post(prompt_list: list[list[int]], **overrides: Any) -> dict[str, Any]:
+            response = await client.post(
+                "/v1/completions", json={**body, **overrides, "prompt": prompt_list}
+            )
+            assert response.status_code == 200, response.text
+            return response.json()
+
+        def _is_clean(snapshot: dict[str, Any]) -> bool:
+            return (
+                bool(snapshot.get("retired"))
+                and snapshot["registry_size"] == 0
+                and not snapshot["active_sessions"]
+                and not engine.output_processor.has_unfinished_requests()
+            )
+
+        async def assert_engine_is_clean() -> None:
+            """No session left resident, nothing half-finished."""
+            snapshot = (await engine.collective_rpc("onerec_v1_st_snapshot"))[0]
+            assert _is_clean(snapshot), snapshot
+
+        async def wait_for_the_engine_to_settle(*, timeout: float = 30.0) -> None:
+            """The same release, polled: a cancelled session retires asynchronously."""
+            deadline = time.monotonic() + timeout
+            while True:
+                snapshot = (await engine.collective_rpc("onerec_v1_st_snapshot"))[0]
+                if _is_clean(snapshot):
+                    return
+                assert time.monotonic() < deadline, f"engine never settled: {snapshot}"
+                await asyncio.sleep(0.01)
+
         async with httpx.AsyncClient(
             transport=httpx.ASGITransport(app=app), base_url="http://test"
         ) as client:
-            # A size this route forms runs as one session holding every prompt.
-            for count in (2, 4):
+            # Any list runs, as one session per contiguous batch, largest first.
+            for count, sizes in ((2, [2]), (3, [2, 1]), (4, [4]), (5, [4, 1]), (6, [4, 2])):
                 assert await engine.reset_prefix_cache()
                 before = len((await engine.collective_rpc("onerec_v1_st_events"))[0])
-                response = await client.post(
-                    "/v1/completions", json={**body, "prompt": prompts[:count]}
-                )
-                assert response.status_code == 200, response.text
-                data = response.json()
+                data = await post(prompts[:count])
                 assert len(data["choices"]) == count * _BEAM_WIDTH
                 assert [c["index"] for c in data["choices"]] == list(range(count * _BEAM_WIDTH))
                 assert data["usage"]["prompt_tokens"] == sum(map(len, prompts[:count]))
                 assert data["usage"]["completion_tokens"] == count * _BEAM_WIDTH * 5
                 stages = await stages_since(before)
-                assert [e["size"] for e in stages if e["stage"] == 0] == [count]
-                assert len({e["session_id"] for e in stages}) == 1
-                snapshot = (await engine.collective_rpc("onerec_v1_st_snapshot"))[0]
-                assert snapshot["retired"] and snapshot["registry_size"] == 0
-                assert not snapshot["active_sessions"]
-                assert not engine.output_processor.has_unfinished_requests()
-                rows.append(dict(count=count, sessions=1, size=count, usage=data["usage"]))
+                assert [e["size"] for e in stages if e["stage"] == 0] == sizes
+                # One engine session per batch: the split is real, not a
+                # relabelling of the single-session path.
+                assert len({e["session_id"] for e in stages}) == len(sizes)
+                await assert_engine_is_clean()
+                rows.append(
+                    dict(count=count, sessions=len(sizes), sizes=sizes, usage=data["usage"])
+                )
+
+            # Splitting must not change the answer: the same prompts posted on
+            # their own give the same text, in the same order, beam for beam.
+            assert await engine.reset_prefix_cache()
+            batched = await post(prompts[:6])
+            assert await engine.reset_prefix_cache()
+            split_manually = (await post(prompts[:4]))["choices"] + (await post(prompts[4:6]))[
+                "choices"
+            ]
+            assert [c["text"] for c in batched["choices"]] == [c["text"] for c in split_manually]
+            await assert_engine_is_clean()
+
+            # An abandoned client must not leave a session behind. One session
+            # runs at a time, so a leaked one would stall every later request:
+            # whatever the abort lands on, the engine has to settle and serve
+            # the next list normally. Which sub-batch the abort interrupts is
+            # left to the unit tests, where the interleaving is deterministic.
+            assert await engine.reset_prefix_cache()
+            request = asyncio.create_task(post(prompts[:6]))
+            await asyncio.sleep(0)
+            request.cancel()
+            with suppress(asyncio.CancelledError):
+                await request
+            await wait_for_the_engine_to_settle()
+            rows.append(
+                dict(
+                    count=6, sessions=0, sizes=[], note=f"aborted, cancelled={request.cancelled()}"
+                )
+            )
+
+            assert await engine.reset_prefix_cache()
+            recovered = await post(prompts[:2])
+            assert len(recovered["choices"]) == 2 * _BEAM_WIDTH
+            await assert_engine_is_clean()
+            rows.append(dict(count=2, sessions=1, sizes=[2], note="after the abort"))
         (work_dir / "completion-batch-evidence.json").write_text(json.dumps(rows, indent=2))
 
 

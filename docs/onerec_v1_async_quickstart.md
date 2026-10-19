@@ -135,9 +135,9 @@ client `beam_width`.
 
 ### Batching several prompts in one HTTP request
 
-The V1 completions route renders a prompt **list** once. When the list length is
-one of the fixed batch sizes the engine supports (4 or 2), it runs the whole list
-as **one** beam session. For example:
+The V1 completions route renders a prompt **list** once and runs it as contiguous
+beam batches, largest first. A list of 4 runs as one session, 6 as 4 then 2, 7 as
+4 then 2 then 1, and any other length partitions the same way. For example:
 
 ```bash
 curl -X POST http://localhost:8000/v1/completions   -H "Content-Type: application/json"   --data '{
@@ -151,21 +151,20 @@ curl -X POST http://localhost:8000/v1/completions   -H "Content-Type: applicatio
   }'
 ```
 
-The engine admission contract supports logical B=1 through B=8. This fixed-batch
-HTTP adapter deliberately keeps its default sizes at 2 and 4; arbitrary-length
-partitioning and configurable online sizes are provided by the follow-up PR.
-Engine support does not imply graph capture for every size. In particular,
-Prefill shapes B=3/5/7 remain uncaptured on the current CUDA capture grid.
+The engine supports logical B=1 through B=8. The online policy defaults to
+`[1, 2, 4]`; configure `beam.online_batch_sizes` in `--vllm-gr-config` to select
+other sizes, such as `[1, 3, 7]`. See [Online batch policy](online_batch_policy.md)
+for capacity constraints and graph-capture limitations.
 
-Two prompts run as one session of 2; four as one session of 4. Any other count
-keeps the original route, which is one session per prompt; a single prompt is
-one session either way. The list is not reordered, and a list that this route
-does not claim behaves exactly as it did before.
+A single prompt is one session either way and keeps the plain route. The list is
+never reordered: the batches are contiguous and are submitted one at a time, so
+the caller's order is the response's order.
 
-The batch must fit `max_num_seqs` and `max_num_batched_tokens`, including the
+Each batch must fit `max_num_seqs` and `max_num_batched_tokens`, including the
 begin token appended to every prompt. If configured, a smaller
-`max_num_scheduled_tokens` also limits it. Engine KV admission remains
-authoritative; the frontend check does not guarantee device capacity.
+`max_num_scheduled_tokens` also limits it, and a `max_num_seqs` below 2 leaves
+every prompt its own session. Engine KV admission remains authoritative; the
+frontend check does not guarantee device capacity.
 
 V1 requires Chunked Prefill to be **off**. Enabling it is refused when the engine
 starts (`beam_search_v1 requires enable_chunked_prefill=False`), not split:
@@ -173,8 +172,15 @@ there is no partial Prefill on this path, and the complete prompt has to fit the
 token budget.
 
 A batch runs one `max_tokens`, so prompts whose effective generation budgets
-differ cannot share a session. No prompt's budget is reduced to match another;
-such a list keeps the original route instead.
+differ cannot share a session. Budgets stay per input and the split absorbs the
+difference: no prompt is shortened to match a neighbour, and prompts that agree
+on nothing simply take a session each.
+
+The list is validated before the first batch is submitted. An input the engine
+would reject fails the whole request rather than truncating it: the earlier
+batches are never computed only to have nowhere to put the answer, and nothing
+is retried or replayed. A failure or a cancellation mid-list closes the running
+session, releases it, and does not submit the next one.
 
 The response is a single object whose `choices` are flat-indexed prompt-major,
 so `k` prompts x `n` beams give `k x n` choices, and `usage.prompt_tokens` sums
@@ -182,8 +188,10 @@ across the entire HTTP request. This is the same shape the original route
 returns, so a caller cannot tell from the response alone whether the list ran as
 one session or as many.
 
-A list that is not batched logs the reason at INFO level. Search the server log
-for `Beam batch declined` to see the prompt count and which condition applied.
+Every claimed list logs its plan at INFO level. Search the server log for
+`Beam batch plan` to see the prompt count, the number of batches, and their
+sizes -- a list whose prompts agreed on nothing shows up there as a plan of all
+sizes 1 rather than silently disappearing.
 
 #### Ownership
 
@@ -211,8 +219,10 @@ VLLM_GR_TEST_MODEL="$ONEREC_MODEL" \
 python -m pytest --run-slow -v -s tests/st/test_onerec_v1_scheduler_st.py
 ```
 
-The same file also carries the completions-route check, which posts a 2-, 4- and
-3-prompt list and reads the session sizes off the existing stage probe:
+The same file also carries the completions-route check, which posts lists of 2
+through 6 prompts, compares the split against the same prompts posted on their
+own, and cancels one mid-list. It reads the session sizes off the existing stage
+probe:
 
 ```bash
 python -m pytest --run-slow -v -s tests/st/test_onerec_v1_scheduler_st.py   -k completion_batch
@@ -231,6 +241,8 @@ python -m pytest --run-slow -v -s tests/st/test_onerec_v1_scheduler_st.py   -k c
 ## Further reading
 
 - [ModelRunner V2 multi-batch execution](modelrunner_v2_multibatch.md): native integration, B=1/2/4 configuration, validation and remaining accuracy work.
+- [Online batch policy](online_batch_policy.md): configure eligible batch sizes
+  from 1 through 8 with `beam.online_batch_sizes`; the default remains `[1, 2, 4]`.
 - [Asynchronous scheduling execution contract](async_scheduling.md): scheduling, Prefill/Decode overlap, and retirement.
 - [GPU Prefill capture configuration](prefill_graph_capture.md): V1 grid compatibility, V2 native capture sizes, and multi-request capacity.
 - [Offline Beam Search V1 reference](../examples/offline_inference/beam_search/README.md#beam-search-v1): full configuration fields and script arguments.
