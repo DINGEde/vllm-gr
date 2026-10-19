@@ -15,7 +15,7 @@ import torch
 
 from tests.constraints.test_table import make_table
 from tests.test_gr_async_scheduler import _batch_request
-from vllm_gr.config import BeamExecutionMode
+from vllm_gr.config import SUPPORTED_BEAM_BATCH_SIZES, BeamExecutionMode
 from vllm_gr.constraints.loader import _upload_cuda_backend
 from vllm_gr.v1.attention.backends.beam_attn import BeamAttentionImpl
 from vllm_gr.v1.attention.backends.beam_graph_kernels import (
@@ -141,7 +141,12 @@ def admission_worker(
     backend, _ = _upload_cuda_backend(make_table(), device=device, max_top_k=4, max_rows=4)
     backend._mark_ready()
     workspace = BeamPostprocessWorkspace.allocate(
-        max_batch=4, beam_width=4, top_k=4, max_decode_steps=3, device=device, logits_dtype=dtype
+        max_batch=max(SUPPORTED_BEAM_BATCH_SIZES),
+        beam_width=4,
+        top_k=4,
+        max_decode_steps=3,
+        device=device,
+        logits_dtype=dtype,
     )
     layers = {
         f"layer.{i}": SimpleNamespace(
@@ -223,6 +228,8 @@ def test_admission_accepts_full_attention(dtype):
     assert worker._beam_context.registry.num_active_sessions == 1
     assert worker._beam_context._gr_execution_owner is owner
     assert owner.beam.workspace.execution_owner is owner
+    assert worker._beam_context.max_batch == owner.beam.workspace.max_batch
+    assert owner.beam.workspace.max_batch == max(SUPPORTED_BEAM_BATCH_SIZES)
     done = torch.Event()
     done.record()
     owner.release(owner.binding, consumer_done=done)

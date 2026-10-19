@@ -1345,3 +1345,57 @@ def test_postprocess_workspace_initializer_is_noop_off_cuda() -> None:
     runner = SimpleNamespace(device=torch.device("cpu"))
     assert gpu_patch.initialize_beam_postprocess_workspaces(runner) is None
     assert not hasattr(runner, "_beam_postprocess_workspaces")
+
+
+def test_postprocess_workspace_initializer_matches_v1_capacity_and_reuses_storage(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from unittest.mock import Mock
+
+    from vllm_gr.config import SUPPORTED_BEAM_BATCH_SIZES, BeamExecutionMode, GRConfig
+    from vllm_gr.v1.beam.beam_decision import (
+        BeamPostprocessWorkspace,
+        BeamPostprocessWorkspaceKey,
+    )
+
+    capacity = max(SUPPORTED_BEAM_BATCH_SIZES)
+    key = BeamPostprocessWorkspaceKey(4, 4, torch.float16)
+    workspace = SimpleNamespace(
+        key=key,
+        max_batch=capacity,
+        max_decode_steps=3,
+        device_memory_bytes=0,
+        pinned_memory_bytes=0,
+    )
+    allocate = Mock(return_value=workspace)
+    monkeypatch.setattr(BeamPostprocessWorkspace, "allocate", allocate)
+    runner = SimpleNamespace(
+        device=torch.device("cuda"),
+        model_config=SimpleNamespace(dtype=torch.float16),
+        _vllm_gr_config=GRConfig(
+            beam_execution_mode=BeamExecutionMode.V1,
+            beam_worker_decision=True,
+            beam_max_width=4,
+            beam_max_decode_steps=3,
+        ),
+    )
+
+    pool = gpu_patch.initialize_beam_postprocess_workspaces(runner)
+    assert pool.require(key) is workspace
+    allocate.assert_called_once_with(
+        max_batch=capacity,
+        beam_width=4,
+        top_k=4,
+        max_decode_steps=3,
+        device=runner.device,
+        logits_dtype=torch.float16,
+        pin_host=True,
+    )
+    runner._beam_context = SimpleNamespace(max_batch=capacity)
+    assert gpu_patch.initialize_beam_postprocess_workspaces(runner) is pool
+    assert allocate.call_count == 1
+
+    runner._beam_context.max_batch = capacity - 1
+    with pytest.raises(RuntimeError, match="geometry changed"):
+        gpu_patch.initialize_beam_postprocess_workspaces(runner)
+    assert allocate.call_count == 1
