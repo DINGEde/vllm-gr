@@ -18,10 +18,9 @@ from typing import Annotated, Literal, NoReturn, TypeGuard
 import msgspec
 from vllm.v1.engine import EngineCoreRequest
 
-from vllm_gr.config import MAX_BEAM_WIDTH
+from vllm_gr.config import MAX_BEAM_WIDTH, SUPPORTED_BEAM_BATCH_SIZES
 
 BEAM_BATCH_PROTOCOL_VERSION = 1
-SUPPORTED_BEAM_BATCH_SIZES = (1, 2, 4)
 DEFAULT_CONSTRAINT_RESOURCE_ID = "default"
 # Terminal failure code for a request the engine refused before the session
 # started. It is the one code the frontend reports as a client error; every

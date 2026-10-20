@@ -258,7 +258,7 @@ def test_close_retries_after_entrypoint_and_client_exit(
         client = Client(SimpleNamespace(engine_client=backend))
         with pytest.raises(RuntimeError):
             await run_beam_search_v1_async(
-                client, OnlineBeamSearchRequest([1, 2], "request-1", object())
+                client, OnlineBeamSearchRequest(([1, 2],), "request-1", object())
             )
         del client
         caplog.clear()
@@ -434,7 +434,7 @@ def test_terminal_failure_precedes_tokenizer_access(online: bool) -> None:
     with pytest.raises(BeamSearchEngineError) as caught:
         if online:
             client = AsyncBeamSearchClient(SimpleNamespace(engine_client=object()))
-            call = OnlineBeamSearchRequest([1, 2], "external", object())
+            call = OnlineBeamSearchRequest(([1, 2],), "external", object())
         else:
             client = BeamSearchClient(SimpleNamespace(llm_engine=object()))
             call = OfflineBeamSearchRequest([[1, 2]], object())
@@ -454,7 +454,7 @@ def test_admission_rejection_is_a_client_error_after_a_terminal_result(online: b
     result = BeamBatchResult(BEAM_BATCH_PROTOCOL_VERSION, "session-1", None, failure)
     if online:
         client = AsyncBeamSearchClient(SimpleNamespace(engine_client=object()))
-        call = OnlineBeamSearchRequest([1, 2], "external", object())
+        call = OnlineBeamSearchRequest(([1, 2],), "external", object())
     else:
         client = BeamSearchClient(SimpleNamespace(llm_engine=object()))
         call = OfflineBeamSearchRequest([[1, 2]], object())

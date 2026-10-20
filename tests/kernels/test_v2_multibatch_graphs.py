@@ -63,7 +63,7 @@ def test_all_batches_capture_at_startup_and_reuse_storage(
     monkeypatch.setattr(V2StageExecutionHooks, "forward_hidden", forward)
     assert capture_multibatch_forward(worker)
     graph = worker._beam_decode_graph
-    assert {s.batch_size for s in graph._bindings} == ({1, 4} if fail_b2 else {1, 2, 4})
+    assert {s.batch_size for s in graph._bindings} == ({1, 3, 4} if fail_b2 else {1, 2, 3, 4})
     buffers = worker._gr_input_buffers
     addresses = (
         buffers.device.data_ptr(),

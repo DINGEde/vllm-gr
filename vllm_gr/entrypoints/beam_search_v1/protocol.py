@@ -28,15 +28,25 @@ class OfflineBeamSearchRequest:
 
 @dataclass(frozen=True, slots=True)
 class OnlineBeamSearchRequest:
-    """Arguments received by the online V1 entry point."""
+    """Arguments received by the online V1 entry point.
 
-    prompt: Any
+    ``prompts`` is a sequence for the same reason the offline request carries
+    one: a caller may submit k prompts as a single logical batch, and the whole
+    sequence is submitted once and runs as one forward.
+    """
+
+    prompts: tuple[Any, ...]
     request_id: str
     params: Any
     lora_request: Any = None
     trace_headers: Any = None
     priority: int = 0
     data_parallel_rank: int | None = None
+
+    def __post_init__(self) -> None:
+        # The field is a sequence on the wire; pinning the concrete type here
+        # keeps a caller's list from being mutated under a running session.
+        object.__setattr__(self, "prompts", tuple(self.prompts))
 
 
 @dataclass(slots=True)

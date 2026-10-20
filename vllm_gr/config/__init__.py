@@ -5,8 +5,10 @@
 
 from vllm_gr.config.models import (
     CONSTRAINT_TABLE_FORMAT,
+    DEFAULT_ONLINE_BATCH_SIZES,
     GR_CONFIG_SCHEMA_VERSION,
     MAX_BEAM_WIDTH,
+    SUPPORTED_BEAM_BATCH_SIZES,
     BeamExecutionMode,
     ConstraintBackend,
     ConstraintTableBackendEnum,
@@ -25,8 +27,10 @@ from vllm_gr.config.parser import (
 
 __all__ = [
     "CONSTRAINT_TABLE_FORMAT",
+    "DEFAULT_ONLINE_BATCH_SIZES",
     "GR_CONFIG_SCHEMA_VERSION",
     "MAX_BEAM_WIDTH",
+    "SUPPORTED_BEAM_BATCH_SIZES",
     "BeamExecutionMode",
     "ConstraintBackend",
     "ConstraintTableBackendEnum",

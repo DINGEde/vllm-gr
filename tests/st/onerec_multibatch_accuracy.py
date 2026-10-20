@@ -284,7 +284,7 @@ def run(args: argparse.Namespace) -> int:
         result["initial"] = snapshot()
         actual_class = result["initial"]["runner_class"]
         assert (".gpu.model_runner." in actual_class) == (args.runner == "v2"), actual_class
-        assert result["initial"]["decode_batches"] == ([1] if args.runner == "v1" else [1, 2, 4])
+        assert result["initial"]["decode_batches"] == ([1] if args.runner == "v1" else [1, 2, 3, 4])
         for b in args.batches:
             assert llm.reset_prefix_cache()
             before = snapshot()

@@ -133,6 +133,72 @@ When changing the Beam width, also update the request, `beam.max_width`,
 Constraint Table `max_top_k`, and engine capacity. Do not change only the
 client `beam_width`.
 
+### Batching several prompts in one HTTP request
+
+The V1 completions route renders a prompt **list** once. When the list length is
+one of the fixed batch sizes the engine supports (4 or 2), it runs the whole list
+as **one** beam session. For example:
+
+```bash
+curl -X POST http://localhost:8000/v1/completions   -H "Content-Type: application/json"   --data '{
+    "model": "OpenOneRec/OneRec-1.7B",
+    "prompt": ["<prompt 0>", "<prompt 1>", "<prompt 2>", "<prompt 3>"],
+    "use_beam_search": true,
+    "n": 128,
+    "temperature": 0.0,
+    "max_tokens": 5,
+    "vllm_xargs": {"begin_token": "<|sid_begin|>", "end_token": "<|sid_end|>"}
+  }'
+```
+
+The engine admission contract supports logical B=1 through B=8. This fixed-batch
+HTTP adapter deliberately keeps its default sizes at 2 and 4; arbitrary-length
+partitioning and configurable online sizes are provided by the follow-up PR.
+Engine support does not imply graph capture for every size. In particular,
+Prefill shapes B=3/5/7 remain uncaptured on the current CUDA capture grid.
+
+Two prompts run as one session of 2; four as one session of 4. Any other count
+keeps the original route, which is one session per prompt; a single prompt is
+one session either way. The list is not reordered, and a list that this route
+does not claim behaves exactly as it did before.
+
+The batch must fit `max_num_seqs` and `max_num_batched_tokens`, including the
+begin token appended to every prompt. If configured, a smaller
+`max_num_scheduled_tokens` also limits it. Engine KV admission remains
+authoritative; the frontend check does not guarantee device capacity.
+
+V1 requires Chunked Prefill to be **off**. Enabling it is refused when the engine
+starts (`beam_search_v1 requires enable_chunked_prefill=False`), not split:
+there is no partial Prefill on this path, and the complete prompt has to fit the
+token budget.
+
+A batch runs one `max_tokens`, so prompts whose effective generation budgets
+differ cannot share a session. No prompt's budget is reduced to match another;
+such a list keeps the original route instead.
+
+The response is a single object whose `choices` are flat-indexed prompt-major,
+so `k` prompts x `n` beams give `k x n` choices, and `usage.prompt_tokens` sums
+across the entire HTTP request. This is the same shape the original route
+returns, so a caller cannot tell from the response alone whether the list ran as
+one session or as many.
+
+A list that is not batched logs the reason at INFO level. Search the server log
+for `Beam batch declined` to see the prompt count and which condition applied.
+
+#### Ownership
+
+The HTTP list is a response boundary; the session formed here is the GPU
+execution-batch boundary. `GRExecutionCapacity.active_sessions` remains 1: the
+session fixes its members before it starts, no members join or leave it, and the
+frontend waits for its iterator and cleanup before anything else runs. This is
+not cross-request coalescing or continuous batching, and it introduces no new
+endpoint or client-side batch-size requirement.
+
+Running a list as one session does not guarantee identical beam rankings to
+separate B=1 calls. GPU batch shapes and prefix-cache execution paths can produce
+different candidates or scores. Validate model quality for the batch sizes you
+deploy.
+
 ## 5. Validate and troubleshoot
 
 With real model weights, run the system test for actual offline and online V1
@@ -145,6 +211,13 @@ VLLM_GR_TEST_MODEL="$ONEREC_MODEL" \
 python -m pytest --run-slow -v -s tests/st/test_onerec_v1_scheduler_st.py
 ```
 
+The same file also carries the completions-route check, which posts a 2-, 4- and
+3-prompt list and reads the session sizes off the existing stage probe:
+
+```bash
+python -m pytest --run-slow -v -s tests/st/test_onerec_v1_scheduler_st.py   -k completion_batch
+```
+
 | Symptom | Resolution |
 | --- | --- |
 | `async_scheduling=True` is required | Use the V1 example and keep this `GRLLM` initialization option. |
@@ -153,6 +226,7 @@ python -m pytest --run-slow -v -s tests/st/test_onerec_v1_scheduler_st.py
 | CUDA graph or out-of-memory error | Start with width 128 and the default `--gpu-memory-utilization 0.5`; check for competing GPU processes. |
 | Online V1 validation is needed | The system test calls `OpenAIServing.beam_search_v1()` with a real asynchronous multiprocess engine. Legacy HTTP gates remain separate. |
 | EOS or Prefill admission error | Set `ignore_eos=True`, disable Chunked Prefill and allow the complete prompt in `max_num_batched_tokens`. |
+| A prompt list did not batch | Check the `Beam batch declined` log line: the count must be 2 or 4, and sequence capacity, the token budget and equal generation budgets must all allow it. |
 
 ## Further reading
 

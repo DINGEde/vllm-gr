@@ -259,7 +259,7 @@ def run(args: argparse.Namespace) -> None:
             str(p.relative_to(source_root)): hashlib.sha256(p.read_bytes()).hexdigest()
             for p in sorted((source_root / "vllm_gr").rglob("*.py"))
         }
-        expected = ([1] if args.runner == "v1" else [1, 2, 4]) if args.mode == "graph" else []
+        expected = ([1] if args.runner == "v1" else [1, 2, 3, 4]) if args.mode == "graph" else []
         assert result["initial"]["decode_batches"] == expected
         llm.collective_rpc("policy_observe")
         for batch in (1, 2, 4, 1, 4, 2):

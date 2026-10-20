@@ -3,7 +3,7 @@
 
 from __future__ import annotations
 
-from collections.abc import AsyncGenerator, Mapping
+from collections.abc import AsyncGenerator, Mapping, Sequence
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -19,7 +19,7 @@ _SUBMIT_REQUEST_ID_PATCH_MARKER = "_vllm_gr_submit_request_id_patch"
 
 async def beam_search_dispatch(
     self,
-    prompt: EngineInput,
+    prompt: EngineInput | Sequence[EngineInput],
     request_id: str,
     params: BeamSearchParams,
     lora_request: LoRARequest | None = None,
@@ -35,6 +35,9 @@ async def beam_search_dispatch(
     implementation instead of being silently served. A missing config parses
     as LEGACY -- the interface this attribute installed before the dispatch
     existed -- so non-GR engines are unaffected.
+
+    ``prompt`` is a sequence when the caller submits one batch, which only the
+    V1 interface accepts; the Legacy one owns a single request per call.
     """
     from vllm_gr.config import BeamExecutionMode, GRConfig
     from vllm_gr.entrypoints.openai.serving_engine import beam_search, beam_search_v1
@@ -57,11 +60,13 @@ async def beam_search_dispatch(
 def patch_beam_search():
     from vllm.entrypoints.openai.engine.serving import OpenAIServing
 
+    from vllm_gr.entrypoints.openai.completion_batch_patch import patch_completion_batch
     from vllm_gr.entrypoints.openai.serving_engine import beam_search_v1
 
     OpenAIServing.beam_search = beam_search_dispatch
     OpenAIServing.beam_search_v1 = beam_search_v1
     patch_admission_rejection_reporting()
+    patch_completion_batch()
 
 
 def patch_admission_rejection_reporting():

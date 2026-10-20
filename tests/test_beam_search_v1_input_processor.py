@@ -113,7 +113,7 @@ def test_online_request_preserves_native_external_id_routing(
             await processor.process_online_inputs(
                 serving,
                 OnlineBeamSearchRequest(
-                    prompt=[1, 2],
+                    prompts=([1, 2],),
                     request_id=request_id,
                     params=BeamSearchParams(beam_width=2, max_tokens=3, ignore_eos=True),
                 ),
@@ -149,7 +149,7 @@ def test_beam_metadata_uses_native_normalized_temperature(temperature: float) ->
     params = BeamSearchParams(beam_width=2, max_tokens=3, temperature=temperature, ignore_eos=True)
     request = asyncio.run(
         BeamSearchInputProcessor(engine).process_online_inputs(
-            serving, OnlineBeamSearchRequest([1, 2], "request-1", params)
+            serving, OnlineBeamSearchRequest(([1, 2],), "request-1", params)
         )
     )
     native_params = request.items[0].request.sampling_params
@@ -171,7 +171,7 @@ def _prepare_request(
         serving = SimpleNamespace(input_processor=SimpleNamespace(tokenizer=tokenizer))
         return asyncio.run(
             processor.process_online_inputs(
-                serving, OnlineBeamSearchRequest(prompt, "request-1", params)
+                serving, OnlineBeamSearchRequest((prompt,), "request-1", params)
             )
         )
     engine.get_supported_tasks = lambda: ("generate",)
@@ -198,7 +198,7 @@ def test_online_request_without_a_tokenizer_names_the_startup_flag() -> None:
             processor.process_online_inputs(
                 serving,
                 OnlineBeamSearchRequest(
-                    [1, 2],
+                    ([1, 2],),
                     "request-1",
                     BeamSearchParams(beam_width=2, max_tokens=3, ignore_eos=True),
                 ),
@@ -236,7 +236,7 @@ def test_public_result_keeps_the_accepted_boundary_ids(
             engine_client=engine, input_processor=SimpleNamespace(tokenizer=tokenizer)
         )
         client: Any = AsyncBeamSearchClient(serving)
-        call: Any = OnlineBeamSearchRequest([1, 2], "external-id", params)
+        call: Any = OnlineBeamSearchRequest(([1, 2],), "external-id", params)
         request = asyncio.run(client.prepare_request(call))
     else:
         engine.get_supported_tasks = lambda: ("generate",)
@@ -279,7 +279,8 @@ def test_public_result_keeps_the_accepted_boundary_ids(
     assert lookups == [token for token in (begin, end) if token is not None]
 
 
-def test_offline_inputs_preserve_caller_formed_batch_order() -> None:
+@pytest.mark.parametrize("batch_size", range(1, 9))  # type: ignore[misc]
+def test_offline_inputs_preserve_caller_formed_batch_order(batch_size: int) -> None:
     engine = _make_engine()
     engine.get_supported_tasks = lambda: ("generate",)
     tokenizer = SimpleNamespace(
@@ -292,22 +293,20 @@ def test_offline_inputs_preserve_caller_formed_batch_order() -> None:
         _lora_request_to_seq=lambda lora, size: [lora] * size,
     )
 
+    prompts = [[10 * (i + 1), 10 * (i + 1) + 1] for i in range(batch_size)]
     request = BeamSearchInputProcessor(engine).process_offline_inputs(
         llm,
         OfflineBeamSearchRequest(
-            prompts=[[10, 11], [20, 21, 22]],
+            prompts=prompts,
             params=BeamSearchParams(beam_width=2, max_tokens=3, ignore_eos=True),
         ),
     )
 
-    assert len(request.items) == 2
-    assert [item.item_index for item in request.items] == [0, 1]
-    assert [item.request.prompt_token_ids for item in request.items] == [
-        [10, 11],
-        [20, 21, 22],
-    ]
+    assert len(request.items) == batch_size
+    assert [item.item_index for item in request.items] == list(range(batch_size))
+    assert [item.request.prompt_token_ids for item in request.items] == prompts
     assert request.batch_id == request.items[0].request.request_id
-    assert request.items[1].request.request_id != request.batch_id
+    assert len({item.request.request_id for item in request.items}) == batch_size
 
 
 def test_offline_inputs_reject_unsupported_batch_size_before_admission() -> None:
@@ -324,7 +323,7 @@ def test_offline_inputs_reject_unsupported_batch_size_before_admission() -> None
         BeamSearchInputProcessor(engine).process_offline_inputs(
             llm,
             OfflineBeamSearchRequest(
-                prompts=[[10], [20], [30]],
+                prompts=[[10 * i] for i in range(1, 10)],
                 params=BeamSearchParams(beam_width=2, max_tokens=3, ignore_eos=True),
             ),
         )

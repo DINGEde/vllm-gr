@@ -122,7 +122,7 @@ def test_plan_preserves_native_capture_budget(
     assert [d.num_tokens for d in descs[Mode.FULL] if d.num_reqs == 1] == list(
         reversed(plan.buckets)
     )
-    assert {d.num_reqs for d in descs[Mode.FULL]} == {1, 2, 4}
+    assert {d.num_reqs for d in descs[Mode.FULL]} == {1, 2, 3, 4}
     assert all(
         d.num_tokens >= d.num_reqs and d.uniform_token_count is None for d in descs[Mode.FULL]
     )

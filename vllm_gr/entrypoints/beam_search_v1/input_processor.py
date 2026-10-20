@@ -260,30 +260,39 @@ class BeamSearchInputProcessor:
                 parameter="skip_tokenizer_init",
                 value=True,
             )
+        if not call.prompts:
+            raise VLLMValidationError("beam_search_v1 requires at least one prompt")
         sampling_params, begin_token_id, end_token_id = _create_request_params(
             call.params, tokenizer
         )
-        request_id = _generate_request_id(call.request_id)
-        engine_request = self.engine.input_processor.process_inputs(
-            request_id,
-            call.prompt,
-            sampling_params,
-            supported_tasks=await self.engine.get_supported_tasks(),
-            arrival_time=time.time(),
-            lora_request=call.lora_request,
-            trace_headers=call.trace_headers,
-            priority=call.priority,
-            data_parallel_rank=call.data_parallel_rank,
-        )
-        _prepare_prompt(engine_request, begin_token_id)
-        self.engine.input_processor.assign_request_id(engine_request)
-        # Native assignment copies our generated ID into external_req_id.
-        # Preserve the caller's original identity for output and abort routing.
-        engine_request.external_req_id = call.request_id
-        session_id = engine_request.request_id
+        # One arrival time and one task set describe the batch, not its
+        # members; asking per prompt would spread a single submission over the
+        # arrival clock and repeat an engine round trip k times.
+        supported_tasks = await self.engine.get_supported_tasks()
+        arrival_time = time.time()
+        engine_requests = []
+        for prompt in call.prompts:
+            engine_request = self.engine.input_processor.process_inputs(
+                _generate_request_id(call.request_id),
+                prompt,
+                sampling_params,
+                supported_tasks=supported_tasks,
+                arrival_time=arrival_time,
+                lora_request=call.lora_request,
+                trace_headers=call.trace_headers,
+                priority=call.priority,
+                data_parallel_rank=call.data_parallel_rank,
+            )
+            _prepare_prompt(engine_request, begin_token_id)
+            self.engine.input_processor.assign_request_id(engine_request)
+            # Native assignment copies our generated ID into external_req_id.
+            # Preserve the caller's original identity for output and abort routing.
+            engine_request.external_req_id = call.request_id
+            engine_requests.append(engine_request)
+        session_id = engine_requests[0].request_id
         request = _create_batch_request(
             session_id=session_id,
-            engine_requests=(engine_request,),
+            engine_requests=tuple(engine_requests),
             params=call.params,
             vllm_config=self.engine.vllm_config,
         )

@@ -13,6 +13,8 @@ CONSTRAINT_TABLE_MAX_DECODE_STEPS = 3
 # runtime contract, and fused kernel on this single limit until wider kernels
 # are implemented and qualified end to end.
 MAX_BEAM_WIDTH = 256
+SUPPORTED_BEAM_BATCH_SIZES = tuple(range(1, 9))
+DEFAULT_ONLINE_BATCH_SIZES = (1, 2, 4)
 
 
 class GRAttentionBackend(str, Enum):

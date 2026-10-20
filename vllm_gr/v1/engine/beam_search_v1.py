@@ -473,7 +473,9 @@ def validate_dispatch(
         if view.batch_size not in SUPPORTED_BEAM_BATCH_SIZES or set(scheduled) != set(
             view.request_ids
         ):
-            raise ValueError("GR requires one immutable logical batch with B=1,2,4")
+            raise ValueError(
+                f"GR requires one immutable logical batch with B in {SUPPORTED_BEAM_BATCH_SIZES}"
+            )
         for number in (m.dispatch_id, m.stage_index, m.num_prompt_tokens, m.owner_generation):
             if isinstance(number, bool) or not isinstance(number, int) or number < 0:
                 raise ValueError(
