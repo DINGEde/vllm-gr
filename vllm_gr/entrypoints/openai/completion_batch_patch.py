@@ -119,12 +119,23 @@ def _effective_budgets(serving, request: CompletionRequest, engine_inputs: list)
     ]
 
 
+def _decode_batch_capacity(serving, request: CompletionRequest) -> int | None:
+    """Bound NPU B*W rows by native input storage, not the Prefill budget."""
+    config = serving.engine_client.vllm_config
+    device = getattr(getattr(config, "device_config", None), "device", "cuda")
+    if str(device).split(":")[0] != "npu":
+        return None
+    # The OpenAI beam adapter maps n to beam_width (None means one).
+    width = request.n if request.n is not None else 1
+    return config.scheduler_config.max_num_batched_tokens // width
+
+
 def _batch_decline_reason(
     serving, request: CompletionRequest, engine_inputs: list, budgets: list[int]
 ) -> str | None:
     """Why this rendered list cannot run as one session, or None if it can.
 
-    Both conditions are checked before the first session is submitted, so a
+    All conditions are checked before the first session is submitted, so a
     list that cannot batch never runs partially.
     """
     if len(set(budgets)) != 1:
@@ -142,6 +153,12 @@ def _batch_decline_reason(
     )
     if total > token_budget:
         return f"Prefill tokens {total} exceed the scheduling budget {token_budget}"
+    decode_capacity = _decode_batch_capacity(serving, request)
+    if budgets[0] > 1 and decode_capacity is not None and len(engine_inputs) > decode_capacity:
+        return (
+            f"NPU Decode batch size {len(engine_inputs)} exceeds the physical input "
+            f"capacity of {decode_capacity} prompts at the requested beam width"
+        )
     return None
 
 

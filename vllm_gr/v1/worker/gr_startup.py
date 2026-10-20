@@ -35,12 +35,15 @@ def _startup_capture_batch_size() -> int:
     raw = os.getenv(ENV_V1_STARTUP_CAPTURE_BATCH_SIZE)
     if raw is None:
         return 1
+    message = (
+        f"{ENV_V1_STARTUP_CAPTURE_BATCH_SIZE} must be one of {list(SUPPORTED_BEAM_BATCH_SIZES)}"
+    )
     try:
         batch_size = int(raw)
     except ValueError as exc:
-        raise ValueError(f"{ENV_V1_STARTUP_CAPTURE_BATCH_SIZE} must be 1, 2, or 4") from exc
+        raise ValueError(message) from exc
     if batch_size not in SUPPORTED_BEAM_BATCH_SIZES:
-        raise ValueError(f"{ENV_V1_STARTUP_CAPTURE_BATCH_SIZE} must be 1, 2, or 4")
+        raise ValueError(message)
     return batch_size
 
 
