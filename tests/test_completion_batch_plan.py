@@ -79,6 +79,45 @@ def test_an_invalid_input_rejects_the_whole_list(lengths: list[int], budgets: li
         _plan(lengths, budgets)
 
 
+@pytest.mark.parametrize(  # type: ignore[misc]
+    ("budgets", "capacity", "expected"),
+    [
+        ([5] * 7, 3, [3, 3, 1]),
+        ([5] * 7, 2, [1] * 7),
+        ([1] * 7, 0, [7]),
+        ([1] * 7 + [5] * 7, 3, [7, 3, 3, 1]),
+        ([5] * 7, None, [7]),
+    ],
+)
+def test_physical_decode_capacity_respects_policy_and_generation_budget(
+    budgets: list[int], capacity: int | None, expected: list[int]
+) -> None:
+    plan = plan_completion_batches(
+        [10] * len(budgets),
+        budgets,
+        supported_sizes=(1, 3, 7),
+        max_num_seqs=8,
+        token_budget=512,
+        max_decode_seqs=capacity,
+    )
+    assert [batch.stop - batch.start for batch in plan] == expected
+    assert [i for batch in plan for i in range(batch.start, batch.stop)] == list(
+        range(len(budgets))
+    )
+
+
+def test_later_input_exceeding_decode_capacity_rejects_whole_plan() -> None:
+    with pytest.raises(ValueError, match="Prompt 1 exceeds the physical Decode capacity"):
+        plan_completion_batches(
+            [10, 10],
+            [1, 5],
+            supported_sizes=(1, 2, 4),
+            max_num_seqs=4,
+            token_budget=512,
+            max_decode_seqs=0,
+        )
+
+
 def test_custom_sizes_respect_generation_budget_boundaries() -> None:
     plan = plan_completion_batches(
         [10] * 8,

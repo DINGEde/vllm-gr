@@ -785,9 +785,12 @@ def test_real_response_conversion_preserves_indices_and_usage(
 def restore_route() -> Any:
     """Installing the patch touches the class itself, so put it back after."""
     before = OpenAIServingCompletion._create_completion
-    yield
-    OpenAIServingCompletion._create_completion = before
-    patch_module._original_create_completion = None
+    original = patch_module._original_create_completion
+    try:
+        yield
+    finally:
+        OpenAIServingCompletion._create_completion = before
+        patch_module._original_create_completion = original
 
 
 def test_the_patch_installs_and_verifies(restore_route: Any) -> None:  # noqa: ARG001
@@ -800,6 +803,63 @@ def test_the_patch_installs_and_verifies(restore_route: Any) -> None:  # noqa: A
 def test_the_patch_is_idempotent(restore_route: Any) -> None:  # noqa: ARG001
     patch_completion_batch()
     original = patch_module._original_create_completion
+    assert callable(original)
     patch_completion_batch()
 
     assert patch_module._original_create_completion is original
+
+
+def test_restore_route_preserves_preinstalled_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+    serving: _BatchSelf,
+    make_request: Callable[..., Any],
+    delegate: list[Any],
+) -> None:
+    original = patch_module._original_create_completion
+    monkeypatch.setattr(OpenAIServingCompletion, "_create_completion", original)
+    patch_completion_batch()
+    cleanup = restore_route.__wrapped__()
+    next(cleanup)
+    patch_module._original_create_completion = None
+    with pytest.raises(StopIteration):
+        next(cleanup)
+    patch_completion_batch()
+    assert patch_module._original_create_completion is original
+    request = make_request(prompt="single")
+    assert asyncio.run(OpenAIServingCompletion._create_completion(serving, request)) == "original"
+    assert delegate == [request]
+
+
+@pytest.mark.parametrize(  # type: ignore[misc]
+    ("device", "tokens", "width", "budget", "sizes"),
+    [
+        ("npu", 512, 256, 5, [2, 2]),
+        ("npu:0", 1023, 256, 5, [2, 2]),
+        ("npu", 1024, 256, 5, [4]),
+        ("npu", 512, 128, 5, [4]),
+        ("npu", 512, 256, 1, [4]),
+        ("cuda", 512, 256, 5, [4]),
+    ],
+)
+def test_decode_capacity_is_checked_before_batch_submission(
+    monkeypatch: pytest.MonkeyPatch,
+    make_serving: Callable[..., _BatchSelf],
+    make_request: Callable[..., Any],
+    delegate: list[Any],
+    device: str,
+    tokens: int,
+    width: int,
+    budget: int,
+    sizes: list[int],
+) -> None:
+    serving = make_serving(
+        max_num_batched_tokens=tokens, prompt_lengths=dict.fromkeys(range(4), 16)
+    )
+    serving.engine_client.vllm_config.device_config = SimpleNamespace(device=device)
+    monkeypatch.setattr(patch_module, "get_max_tokens", lambda *_args, **_kwargs: budget)
+    request = make_request(n=width, max_tokens=budget, vllm_xargs={"begin_token": 1})
+    result = asyncio.run(create_completion_batch_dispatch(serving, request))
+    assert result == "response-for-4"
+    assert [len(call["prompt"]) for call in serving.beam_calls] == sizes
+    assert [item for call in serving.beam_calls for item in call["prompt"]] == list(range(4))
+    assert not delegate

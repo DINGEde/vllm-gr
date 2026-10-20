@@ -35,6 +35,7 @@ from vllm_gr.config.validation import (
     validate_constraint_table_format,
     validate_constraint_table_max_top_k,
     validate_constraint_table_path,
+    validate_enable_short_suffix_attention,
     validate_npu_decode_execution,
     validate_schema_version,
     validate_tokenizer_digest,
@@ -49,6 +50,7 @@ CONSTRAINT_BACKEND_KEY: Final = "vllm_gr_constraint_backend"
 ATTENTION_BACKEND_KEY: Final = "vllm_gr_attention_backend"
 VOCAB_OFFSET_KEY: Final = "vllm_gr_vocab_offset"
 VOCAB_SLICE_SIZE_KEY: Final = "vllm_gr_vocab_slice_size"
+SHORT_SUFFIX_ATTENTION_KEY: Final = "vllm_gr_enable_short_suffix_attention"
 BEAM_GRAPH_ENABLED_KEY: Final = "vllm_gr_beam_graph_enabled"
 BEAM_GRAPH_BATCH_SIZE_KEY: Final = "vllm_gr_beam_graph_batch_size"
 BEAM_ONLINE_BATCH_SIZES_KEY: Final = "vllm_gr_beam_online_batch_sizes"
@@ -67,6 +69,7 @@ KNOWN_GR_CONFIG_KEYS: Final = frozenset(
         VOCAB_OFFSET_KEY,
         VOCAB_SLICE_SIZE_KEY,
         BEAM_GRAPH_ENABLED_KEY,
+        SHORT_SUFFIX_ATTENTION_KEY,
         BEAM_GRAPH_BATCH_SIZE_KEY,
         BEAM_ONLINE_BATCH_SIZES_KEY,
         BEAM_MAX_WIDTH_KEY,
@@ -83,6 +86,7 @@ _TOP_LEVEL_KEYS: Final = frozenset(
 _BEAM_KEYS: Final = frozenset(
     {
         "graph_enabled",
+        "enable_short_suffix_attention",
         "graph_batch_size",
         "online_batch_sizes",
         "max_width",
@@ -190,6 +194,9 @@ def gr_config_from_mapping(
     return GRConfig(
         attention_backend=validate_attention_backend(mapping.get("attention_backend")),
         beam_graph_enabled=graph_enabled,
+        enable_short_suffix_attention=validate_enable_short_suffix_attention(
+            beam_raw.get("enable_short_suffix_attention", False)
+        ),
         beam_graph_batch_size=validate_beam_graph_batch_size(beam_raw.get("graph_batch_size", 1)),
         beam_online_batch_sizes=validate_beam_online_batch_sizes(
             beam_raw.get("online_batch_sizes", DEFAULT_ONLINE_BATCH_SIZES)
@@ -241,6 +248,8 @@ def gr_config_to_mapping(config: GRConfig) -> dict[str, object]:
         "max_width": config.beam_max_width,
         "max_decode_steps": config.beam_max_decode_steps,
     }
+    if config.enable_short_suffix_attention:
+        beam["enable_short_suffix_attention"] = True
     if config.beam_graph_batch_size != 1:
         beam["graph_batch_size"] = config.beam_graph_batch_size
     if config.beam_online_batch_sizes != DEFAULT_ONLINE_BATCH_SIZES:
@@ -343,6 +352,9 @@ def parse_gr_config(vllm_config: object | None) -> GRConfig:
         attention_backend=validate_attention_backend(additional_config.get(ATTENTION_BACKEND_KEY)),
         vocab_offset=validate_vocab_offset(additional_config.get(VOCAB_OFFSET_KEY)),
         vocab_slice_size=validate_vocab_slice_size(additional_config.get(VOCAB_SLICE_SIZE_KEY)),
+        enable_short_suffix_attention=validate_enable_short_suffix_attention(
+            additional_config.get(SHORT_SUFFIX_ATTENTION_KEY, False)
+        ),
         beam_graph_enabled=validate_beam_graph_enabled(
             additional_config.get(BEAM_GRAPH_ENABLED_KEY, True)
         ),
@@ -417,6 +429,11 @@ def write_gr_config(vllm_config: object, gr_config: GRConfig) -> None:
         additional_config.pop(VOCAB_SLICE_SIZE_KEY, None)
     else:
         additional_config[VOCAB_SLICE_SIZE_KEY] = vocab_slice_size
+
+    if gr_config.enable_short_suffix_attention:
+        additional_config[SHORT_SUFFIX_ATTENTION_KEY] = True
+    else:
+        additional_config.pop(SHORT_SUFFIX_ATTENTION_KEY, None)
 
     if gr_config.beam_graph_enabled:
         additional_config.pop(BEAM_GRAPH_ENABLED_KEY, None)

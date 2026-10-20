@@ -104,6 +104,17 @@ def _reserved_prompt_tokens(request: CompletionRequest) -> int:
     return 1 if extra_args.get("begin_token") is not None else 0
 
 
+def _decode_batch_capacity(serving, request: CompletionRequest) -> int | None:
+    """Bound NPU B*W rows by native input storage, not the Prefill budget."""
+    config = serving.engine_client.vllm_config
+    device = getattr(getattr(config, "device_config", None), "device", "cuda")
+    if str(device).split(":")[0] != "npu":
+        return None
+    # The OpenAI beam adapter maps n to beam_width (None means one).
+    width = request.n if request.n is not None else 1
+    return config.scheduler_config.max_num_batched_tokens // width
+
+
 def _completion_batch_plan(
     serving, request: CompletionRequest, engine_inputs: list
 ) -> tuple[CompletionBatch, ...]:
@@ -144,6 +155,7 @@ def _completion_batch_plan(
             supported_sizes=sizes,
             max_num_seqs=getattr(scheduler, "max_num_seqs", max(sizes)),
             token_budget=token_budget,
+            max_decode_seqs=_decode_batch_capacity(serving, request),
         )
     except ValueError as exc:
         raise VLLMValidationError(str(exc)) from exc

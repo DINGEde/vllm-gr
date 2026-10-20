@@ -36,6 +36,13 @@ Members must have equal effective generation budgets, fit the scheduling token
 budget together, and satisfy `max_num_seqs`. A configured size is eligible,
 not guaranteed: capacity and per-input budgets can require smaller batches.
 
+On NPU, batches requiring Decode must also satisfy
+`batch_size * beam_width <= max_num_batched_tokens`, because Decode expands
+each logical input into physical rows in native input buffers. The planner
+splits further when needed; this is separate from the Prefill token sum and
+does not apply to CUDA or to a generation budget of one (Prefill-only).
+An input that cannot fit even alone rejects the whole plan before submission.
+
 With compatible inputs and sufficient capacity:
 
 | Policy | Input count | Execution sizes |
