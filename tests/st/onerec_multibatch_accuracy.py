@@ -58,7 +58,7 @@ def run(args: argparse.Namespace) -> int:
         build_artifact,
         load_triples,
     )
-    from tests.st.model_runner_policy_isolation import check_idle
+    from tests.st.model_runner_policy_isolation import check_idle, startup_expectations
     from tests.st.multibatch_accuracy_checks import compare_output, validate_output
     from vllm_gr.entrypoints.gr import GRLLM
     from vllm_gr.sampling_params import BeamSearchParams
@@ -205,7 +205,7 @@ def run(args: argparse.Namespace) -> int:
             "tokenizer_digest": artifact_info["tokenizer_digest"],
         },
     }
-    kwargs = {
+    kwargs: dict[str, Any] = {
         "model": str(model),
         "trust_remote_code": True,
         "dtype": "bfloat16",
@@ -222,6 +222,12 @@ def run(args: argparse.Namespace) -> int:
         "compilation_config": {"cudagraph_capture_sizes": capture_sizes},
         "worker_extension_cls": "tests.st.model_runner_policy_isolation.PolicyWorkerExtension",
     }
+    expected_rows, expected_batches = startup_expectations(
+        runner=args.runner,
+        config=config,
+        max_num_seqs=kwargs["max_num_seqs"],
+        enforce_eager=kwargs["enforce_eager"],
+    )
     gen = task.config["generation_config"]
     params = BeamSearchParams(
         beam_width=gen["num_beams"],
@@ -272,6 +278,7 @@ def run(args: argparse.Namespace) -> int:
         nonlocal addresses
         value: dict[str, Any] = llm.collective_rpc("policy_snapshot")[0]
         check_idle(value)
+        assert value["backend_rows"] == expected_rows
         if args.runner == "v2":
             if addresses is None:
                 addresses = value["addresses"]
@@ -284,7 +291,7 @@ def run(args: argparse.Namespace) -> int:
         result["initial"] = snapshot()
         actual_class = result["initial"]["runner_class"]
         assert (".gpu.model_runner." in actual_class) == (args.runner == "v2"), actual_class
-        assert result["initial"]["decode_batches"] == ([1] if args.runner == "v1" else [1, 2, 3, 4])
+        assert result["initial"]["decode_batches"] == expected_batches
         for b in args.batches:
             assert llm.reset_prefix_cache()
             before = snapshot()

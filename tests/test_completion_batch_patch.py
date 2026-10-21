@@ -23,8 +23,6 @@ from vllm_gr.entrypoints.openai.completion_batch_patch import (
 )
 from vllm_gr.entrypoints.openai.completion_batch_plan import CompletionBatch
 
-# The one input shape every execution test shares unless it says otherwise:
-# four prompts of equal rendered length, so nothing declines for capacity.
 _EQUAL_LENGTHS = dict.fromkeys(range(4), 10)
 
 
@@ -119,11 +117,7 @@ class _BatchSelf:
 
 @pytest.fixture  # type: ignore[misc]
 def make_serving(monkeypatch: pytest.MonkeyPatch) -> Callable[..., _BatchSelf]:
-    """Build the borrowed serving surface with a stubbed budget formula.
-
-    The budget formula belongs to vLLM; what this patch owes is the choice
-    among the per-prompt results, so the input length is the only variable.
-    """
+    """Stub per-prompt budgets; test the real formula separately below."""
 
     def _make(**kwargs: Any) -> _BatchSelf:
         serving = _BatchSelf(
@@ -283,23 +277,16 @@ def test_a_batch_renders_once_and_submits_once(
     serving: _BatchSelf, make_request: Callable[..., Any], logged: Mock
 ) -> None:
     """Four prompts are one render, one session, and one response."""
-    assert asyncio.run(create_completion_batch_dispatch(serving, make_request())) == (
-        "response-for-4"
-    )
+    to_params = Mock(return_value={"max_tokens": 990})
+    request = make_request(to_beam_search_params=to_params)
+    assert asyncio.run(create_completion_batch_dispatch(serving, request)) == ("response-for-4")
     assert serving.render_calls == 1
     assert [call["prompt"] for call in serving.beam_calls] == [[0, 1, 2, 3]]
-    assert serving.logged == [
-        "cmpl-request-0-0",
-        "cmpl-request-0-1",
-        "cmpl-request-0-2",
-        "cmpl-request-0-3",
-    ]
-    assert [res.prompt for res in serving.response_calls[0]] == [
-        "text-0",
-        "text-1",
-        "text-2",
-        "text-3",
-    ]
+    to_params.assert_called_once_with(990, serving.default_sampling_params)
+    assert serving.beam_calls[0]["params"] == {"max_tokens": 990}
+    assert serving.logged == [f"cmpl-request-0-{i}" for i in range(4)]
+    assert len(serving.response_calls) == 1
+    assert [res.prompt for res in serving.response_calls[0]] == [f"text-{i}" for i in range(4)]
     assert logged.call_args.args == (
         "Beam batch plan request_id=%s prompts=%d sub_batches=%d sizes=%s",
         "cmpl-request-0",
@@ -309,13 +296,15 @@ def test_a_batch_renders_once_and_submits_once(
     )
 
 
-@pytest.mark.parametrize("count", [2, 3, 7, 8])  # type: ignore[misc]
-def test_explicit_batch_policy_selects_fixed_http_sizes(
+@pytest.mark.parametrize("sizes", [None, [1, 3, 7]], ids=["default", "custom"])  # type: ignore[misc]
+@pytest.mark.parametrize("count", [2, 3, 4, 7, 8])  # type: ignore[misc]
+def test_batch_policy_selects_fixed_http_sizes(
     make_serving: Callable[..., _BatchSelf],
     make_request: Callable[..., Any],
     delegate: list[Any],
     monkeypatch: pytest.MonkeyPatch,
     count: int,
+    sizes: list[int] | None,
 ) -> None:
     from vllm_gr.config import GRConfig
 
@@ -325,34 +314,21 @@ def test_explicit_batch_policy_selects_fixed_http_sizes(
     )
     serving.engine_client.vllm_config.additional_config = {
         "vllm_gr_beam_execution_mode": "v1",
-        "vllm_gr_beam_online_batch_sizes": [1, 3, 7],
     }
+    if sizes is not None:
+        serving.engine_client.vllm_config.additional_config["vllm_gr_beam_online_batch_sizes"] = (
+            sizes
+        )
     request = make_request(prompt=["a"] * count)
     result = asyncio.run(create_completion_batch_dispatch(serving, request))
     assert result == f"response-for-{count}"
-    expected = {2: [1, 1], 3: [3], 7: [7], 8: [7, 1]}[count]
+    expected = (
+        {2: [2], 3: [2, 1], 4: [4], 7: [4, 2, 1], 8: [4, 4]}
+        if sizes is None
+        else {2: [1, 1], 3: [3], 4: [3, 1], 7: [7], 8: [7, 1]}
+    )[count]
     assert [len(call["prompt"]) for call in serving.beam_calls] == expected
     assert not delegate
-
-
-def test_the_batch_runs_the_shared_per_prompt_budget(
-    make_serving: Callable[..., _BatchSelf], make_request: Callable[..., Any]
-) -> None:
-    """One session runs one budget, so the batch carries the agreed one."""
-    serving = make_serving()
-    seen: list[int] = []
-
-    def to_beam_search_params(tokens: int, _defaults: Any) -> dict[str, Any]:
-        seen.append(tokens)
-        return {"max_tokens": tokens}
-
-    asyncio.run(
-        create_completion_batch_dispatch(
-            serving, make_request(to_beam_search_params=to_beam_search_params)
-        )
-    )
-
-    assert seen == [990]
 
 
 def test_different_lengths_can_share_the_real_generation_budget(
@@ -729,11 +705,6 @@ def test_a_cancelled_client_is_answered_rather_than_raised(
     assert serving.error[0] == "Client disconnected"
 
 
-# --------------------------------------------------------------------------- #
-# The real response converter and the patch itself
-# --------------------------------------------------------------------------- #
-
-
 def test_real_response_conversion_preserves_indices_and_usage(
     make_serving: Callable[..., _BatchSelf], monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -819,15 +790,11 @@ def restore_route() -> Any:
         patch_module._original_create_completion = original
 
 
-def test_the_patch_installs_and_verifies(restore_route: Any) -> None:  # noqa: ARG001
+def test_the_patch_installs_verifies_and_is_idempotent(restore_route: Any) -> None:  # noqa: ARG001
     patch_completion_batch()
 
     assert OpenAIServingCompletion._create_completion is create_completion_batch_dispatch
     assert patch_module._validate_completion_batch_patch() is None
-
-
-def test_the_patch_is_idempotent(restore_route: Any) -> None:  # noqa: ARG001
-    patch_completion_batch()
     original = patch_module._original_create_completion
     assert callable(original)
     patch_completion_batch()
