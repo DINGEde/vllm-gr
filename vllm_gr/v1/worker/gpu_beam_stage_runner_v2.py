@@ -262,9 +262,11 @@ class V2StageExecutionHooks(_StageExecutionHooks):
 
         worker = self.worker
         batch_size = len(owner.bindings)
+        cfg = _get_gr_config(worker)
         enabled = (
             not worker.model_config.enforce_eager
-            and _get_gr_config(worker).beam_graph_enabled
+            and cfg.beam_graph_enabled
+            and batch_size in cfg.beam_online_batch_sizes
             and not getattr(worker, "_gr_async_decode_graph_capture_failed", False)
             and batch_size not in getattr(worker, "_gr_decode_capture_failures", {})
         )
@@ -423,10 +425,15 @@ def make_v2_stage_hooks(worker: Any) -> V2StageExecutionHooks:
 
 
 def should_replay_decode_graph_v2(worker: Any, graph: Any, *, batch_size: int) -> bool:
-    """A refused V2 shape falls back without disabling other captured B values."""
+    """Unselected/refused shapes fall back; missing selected graphs remain fatal."""
     from vllm_gr.v1.worker.model_runner_common import _get_gr_config
 
-    requested = not worker.model_config.enforce_eager and _get_gr_config(worker).beam_graph_enabled
+    cfg = _get_gr_config(worker)
+    requested = not worker.model_config.enforce_eager and cfg.beam_graph_enabled
+    if requested and batch_size not in cfg.beam_online_batch_sizes:
+        if graph is not None:
+            raise RuntimeError("Unconfigured Decode shape has a published graph")
+        return False
     if requested and batch_size in getattr(worker, "_gr_decode_capture_failures", {}):
         if graph is not None:
             raise RuntimeError("Decode capture failed but a graph is still published")

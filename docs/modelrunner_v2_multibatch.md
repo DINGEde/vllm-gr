@@ -1,6 +1,6 @@
 # ModelRunner V2 multi-batch execution
 
-ModelRunner V2 supports one Beam Search V1 call containing B=1, 2, or 4 logical
+ModelRunner V2 supports one Beam Search V1 call containing B=1 through 8 logical
 requests. Each member has its own prompt, candidates, scores and KV history.
 Beam width W is fixed by the engine configuration; Decode processes B * W
 physical rows. B is not the beam width or the asynchronous dispatch depth.
@@ -15,11 +15,14 @@ native request or KV state.
 
 After Prefill, both runners use the existing GR stage runner, Beam state,
 Constraint Table and Decode graph primitives. V2 alone uses a worker-owned
-input allocation with room for 4 * W rows; each batch uses a view of that
-storage. V2 startup captures the admitted B=1/2/4 Decode shapes. Switching B updates buffer
+input allocation with room for 8 * W rows; each batch uses a view of that
+storage. V2 startup captures the configured Decode shapes, defaulting to
+B=1/2/4, bounded by `max_num_seqs`. Switching B updates buffer
 contents and selects an existing graph without request-time capture. V2 can
 fall back to eager execution for an individually unsupported capture after
 checking cleanup and device health; other captured shapes remain usable.
+Legal sizes outside the configured capture policy use eager Decode. A missing
+graph for a successfully captured configured size remains an error.
 
 V2 retirement passes all logical member IDs back through native request cleanup.
 V2 model replacement and shutdown invalidate both Prefill and Decode captures
@@ -54,6 +57,12 @@ Use the Beam configuration and Constraint Table artifact described in the
 batch through `GRLLM.beam_search_v1()`. `beam.execution_mode="v1"` selects the
 Beam protocol; it does not select ModelRunner V1.
 
+`beam.online_batch_sizes` defaults to `[1, 2, 4]`. For example, `[1, 3, 7]`
+enables fixed HTTP batches of 3 and 7 and selects those startup Decode capture
+sizes. It also selects Prefill request counts unless the Prefill-specific
+environment override is set. Increase `max_num_seqs` explicitly to at least 7;
+the policy never enlarges engine capacity automatically.
+
 For B=4, set `max_num_seqs` to at least 4 and make
 `max_num_batched_tokens` large enough for the sum of all remaining prompt
 tokens. `max_model_len` remains a per-member limit. The native request capacity
@@ -64,7 +73,7 @@ Table top-k capacity.
 The implemented scope is CUDA, one executing logical batch, fixed beam width,
 N=1/2/3 generation steps, asynchronous scheduling, and TP/PP/DP/DCP/PCP=1.
 Keep `ignore_eos=True` and Chunked Prefill disabled. This scope does not include
-arbitrary B, concurrent batch owners, distributed execution, LoRA, multimodal
+unbounded B, concurrent batch owners, distributed execution, LoRA, multimodal
 inputs or speculative decoding. The validation below exercises offline calls;
 it does not establish automatic batching through an HTTP service.
 
@@ -86,7 +95,7 @@ state and actual CUDA replay check request order and storage reuse.
 | Native token budget and `(B,T)` admission, V1 grid isolation | `tests/test_gpu_prefill_graph_runner_v2.py` |
 | Logical member order, retirement and Backend capacity policy | `tests/test_v2_multibatch.py` |
 | Native row/slot reuse and unchanged request state | `tests/kernels/test_gpu_beam_stage_v2_state.py` |
-| Actual B-switch replay, fixed storage, B=2 eager fallback with B=1/4 preserved | `tests/kernels/test_v2_multibatch_graphs.py` |
+| B-switch replay, fixed storage, configured B=3/7 and 6/8, per-shape fallback | `tests/kernels/test_v2_multibatch_graphs.py` |
 | Captured model/storage binding; reload/shutdown cleanup opt-in | `tests/test_beam_decode_graph.py`, `tests/v1/worker/test_constraint_lifecycle.py` |
 | Prefill reload/shutdown invalidation, recapture with new model/output storage | `tests/test_gpu_prefill_graph_runner_v2.py`, `tests/kernels/test_prefill_graph_manager_v2.py` |
 | Existing public protocol, generation steps and scheduler integration | `tests/st/test_onerec_v1_scheduler_st.py`, `tests/st/test_modelrunner_v2_stage_parity_st.py` |

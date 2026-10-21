@@ -10,27 +10,19 @@ from typing import Any
 import torch
 from vllm.logger import init_logger
 
+from vllm_gr.config import (
+    DEFAULT_ONLINE_BATCH_SIZES,
+    SUPPORTED_BEAM_BATCH_SIZES,
+    GRConfig,
+)
+
 logger = init_logger(__name__)
 
 PREFILL_GRAPH_BUCKET_STEP_DEFAULT = 128
 PREFILL_GRAPH_MAX_BUCKET_DEFAULT = 8192
-# Request counts that receive a captured Prefill CUDA graph. Order matters and
-# the last entry is load-bearing: the runner sizes its block_table_buf from
-# [-1] and falls back to it as the default max_num_seqs, so a count is
-# inserted in ascending position, never appended past a larger one.
-#
-# 1 and 4 are the original footprint -- legacy per-request dispatch, and the
-# widest V1 batch the grid was sized for. 2 is added because a 2-wide V1
-# session is a supported configuration (SUPPORTED_NUM_REQS below admits it,
-# max_num_seqs admits it) that nonetheless had no graph, so every Prefill
-# silently took the eager fallback. The gap only showed on the
-# prefix-cache-hit path: a graphed 4-wide replay costs 11.1 ms where the eager
-# 2-wide one cost 41.7 ms, i.e. half the requests for 3.8x the time. A
-# full-length Prefill is GEMM-bound, so the cache-miss path is unaffected
-# either way. 6 and 8 cover the wider V1 sessions admitted by
-# SUPPORTED_BEAM_BATCH_SIZES and would otherwise repeat the same silent eager
-# fallback. Batch sizes 3, 5 and 7 stay uncaptured.
-PREFILL_GRAPH_CAPTURE_NUM_REQS = (1, 2, 4, 6, 8)
+# Default capture policy is deliberately narrower than engine capability.
+# Static buffer capacity remains independent of the selected capture grid.
+PREFILL_GRAPH_CAPTURE_NUM_REQS = DEFAULT_ONLINE_BATCH_SIZES
 # Small exact buckets, available as an opt-in extension of the configured
 # grid (see get_default_buckets). A prefix-cache hit schedules only the
 # uncached tail ((((N - 1) mod block_size) + 1) <= 16 tokens at block_size
@@ -155,16 +147,15 @@ def _parse_int_list_env(name: str, raw: str) -> list[int]:
     return values
 
 
-def get_prefill_graph_capture_num_reqs() -> tuple[int, ...]:
-    """Allow one process to capture only the request counts it will serve."""
+def get_prefill_graph_capture_num_reqs(vllm_config: object | None = None) -> tuple[int, ...]:
+    """Use the batch policy unless an explicit Prefill-only grid overrides it."""
     raw = os.getenv(ENV_PREFILL_GRAPH_CAPTURE_NUM_REQS)
     if raw is None:
-        return PREFILL_GRAPH_CAPTURE_NUM_REQS
+        return GRConfig.from_vllm_config(vllm_config).beam_online_batch_sizes
     values = _parse_int_list_env(ENV_PREFILL_GRAPH_CAPTURE_NUM_REQS, raw)
-    if any(value not in PREFILL_GRAPH_CAPTURE_NUM_REQS for value in values):
+    if any(value not in SUPPORTED_BEAM_BATCH_SIZES for value in values):
         raise ValueError(
-            f"{ENV_PREFILL_GRAPH_CAPTURE_NUM_REQS} must contain only "
-            f"{PREFILL_GRAPH_CAPTURE_NUM_REQS}"
+            f"{ENV_PREFILL_GRAPH_CAPTURE_NUM_REQS} must contain only {SUPPORTED_BEAM_BATCH_SIZES}"
         )
     return tuple(values)
 

@@ -621,7 +621,6 @@ def test_opt_in_graded_b4_prefill_graph_config(monkeypatch: pytest.MonkeyPatch) 
     from vllm_gr.v1.worker.prefill_graph_common import (
         ENV_PREFILL_GRAPH_BUCKETS,
         ENV_PREFILL_GRAPH_CAPTURE_NUM_REQS,
-        PREFILL_GRAPH_CAPTURE_NUM_REQS,
         get_default_buckets,
         get_prefill_graph_capture_num_reqs,
     )
@@ -634,14 +633,31 @@ def test_opt_in_graded_b4_prefill_graph_config(monkeypatch: pytest.MonkeyPatch) 
     monkeypatch.setenv(ENV_PREFILL_GRAPH_BUCKETS, "256,1024,512")
     with pytest.raises(ValueError, match="strictly increasing"):
         get_default_buckets()
-    # The target branch may capture additional widths (including 2); choose
-    # one beyond the supported capture widths in this version.
+    # All supported sizes can be selected explicitly, not just the defaults.
     monkeypatch.setenv(
         ENV_PREFILL_GRAPH_CAPTURE_NUM_REQS,
-        str(max(PREFILL_GRAPH_CAPTURE_NUM_REQS) + 1),
+        "9",
     )
     with pytest.raises(ValueError, match="must contain only"):
         get_prefill_graph_capture_num_reqs()
+
+
+def test_prefill_capture_policy_and_explicit_wider_sizes(monkeypatch: pytest.MonkeyPatch) -> None:
+    from types import SimpleNamespace
+
+    from vllm_gr.v1.worker.prefill_graph_common import (
+        ENV_PREFILL_GRAPH_CAPTURE_NUM_REQS,
+        get_prefill_graph_capture_num_reqs,
+    )
+
+    monkeypatch.delenv(ENV_PREFILL_GRAPH_CAPTURE_NUM_REQS, raising=False)
+    assert get_prefill_graph_capture_num_reqs() == (1, 2, 4)
+    host = SimpleNamespace(additional_config={"vllm_gr_beam_online_batch_sizes": [1, 3, 7]})
+    assert get_prefill_graph_capture_num_reqs(host) == (1, 3, 7)
+    monkeypatch.setenv(ENV_PREFILL_GRAPH_CAPTURE_NUM_REQS, "1,2,4")
+    assert get_prefill_graph_capture_num_reqs(host) == (1, 2, 4)
+    monkeypatch.setenv(ENV_PREFILL_GRAPH_CAPTURE_NUM_REQS, "3,5,6,7,8")
+    assert get_prefill_graph_capture_num_reqs(host) == (3, 5, 6, 7, 8)
 
 
 def test_custom_b4_bucket_limit_uses_total_tokens(monkeypatch: pytest.MonkeyPatch) -> None:

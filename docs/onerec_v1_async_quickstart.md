@@ -136,7 +136,7 @@ client `beam_width`.
 ### Batching several prompts in one HTTP request
 
 The V1 completions route renders a prompt **list** once. When the list length is
-one of the fixed batch sizes the engine supports (4 or 2), it runs the whole list
+one of the configured fixed batch sizes (2 or 4 by default), it runs the whole list
 as **one** beam session. For example:
 
 ```bash
@@ -151,13 +151,42 @@ curl -X POST http://localhost:8000/v1/completions   -H "Content-Type: applicatio
   }'
 ```
 
-The engine admission contract supports logical B=1 through B=8. This fixed-batch
-HTTP adapter deliberately keeps its default sizes at 2 and 4; arbitrary-length
-partitioning and configurable online sizes are provided by the follow-up PR.
-Engine support does not imply graph capture for every size. In particular,
-Prefill shapes B=3/5/7 remain uncaptured on the current CUDA capture grid.
+The engine admission contract supports logical B=1 through B=8. The default
+`beam.online_batch_sizes` policy is `[1, 2, 4]`; engine capability does not
+automatically enable every size for HTTP batching or CUDA graph capture.
+Arbitrary-length partitioning remains a separate follow-up feature.
 
-Two prompts run as one session of 2; four as one session of 4. Any other count
+To enable other exact HTTP batch sizes, add this field to the existing
+`--vllm-gr-config` YAML and restart the service:
+
+```yaml
+beam:
+  execution_mode: v1
+  online_batch_sizes: [1, 3, 7]
+```
+
+Keep the existing model/constraint-table settings. Use `--max-num-seqs 7` or
+higher for this example. The list must contain unique integers in 1..8 and
+include 1; order is normalized. A non-default policy exceeding `max_num_seqs`
+is rejected during engine configuration, not repaired by increasing capacity.
+The default policy is limited by the configured capacity, preserving B=1-only
+deployments. Prefill token and NPU Decode B*beam_width limits still apply.
+
+CUDA V1/V2 Prefill capture follows this policy by default. The existing
+`VLLM_GR_PREFILL_GRAPH_CAPTURE_NUM_REQS` environment variable can override
+Prefill capture independently (for example `1,2,4` to avoid larger captures).
+It accepts increasing sizes in 1..8; uncaptured Prefill shapes retain fallback.
+CUDA ModelRunner V2 Decode capture follows the policy too: unselected sizes use
+eager execution, while a missing graph for a selected, successfully captured
+size remains an error. V1's single Decode startup shape is unchanged and uses
+`VLLM_GR_V1_STARTUP_CAPTURE_BATCH_SIZE` (default 1). NPU's exact Decode graph
+shape remains controlled by `beam.graph_batch_size`.
+
+These settings take effect at startup, not per HTTP request. Wider capture
+sets increase startup cost and graph memory. Persistent workspace capacity
+still covers the engine's 1..8 capability and remains independent of the policy.
+
+By default, two prompts run as one session of 2; four as one session of 4. Any other count
 keeps the original route, which is one session per prompt; a single prompt is
 one session either way. The list is not reordered, and a list that this route
 does not claim behaves exactly as it did before.
@@ -226,7 +255,7 @@ python -m pytest --run-slow -v -s tests/st/test_onerec_v1_scheduler_st.py   -k c
 | CUDA graph or out-of-memory error | Start with width 128 and the default `--gpu-memory-utilization 0.5`; check for competing GPU processes. |
 | Online V1 validation is needed | The system test calls `OpenAIServing.beam_search_v1()` with a real asynchronous multiprocess engine. Legacy HTTP gates remain separate. |
 | EOS or Prefill admission error | Set `ignore_eos=True`, disable Chunked Prefill and allow the complete prompt in `max_num_batched_tokens`. |
-| A prompt list did not batch | Check the `Beam batch declined` log line: the count must be 2 or 4, and sequence capacity, the token budget and equal generation budgets must all allow it. |
+| A prompt list did not batch | Check `Beam batch declined`: the count must be in `beam.online_batch_sizes`, and sequence capacity, the token budget and equal generation budgets must all allow it. |
 
 ## Further reading
 

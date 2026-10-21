@@ -467,9 +467,13 @@ async def _run_online_completion_batch(work_dir: Path) -> None:
 
     initialize_runtime()
     model, tokenizer, config, source, newline, _legal = _inputs(work_dir)
-    # Capacity only: the same engine configuration as the cases above, sized so
-    # that a four-prompt list can be resident at once.
-    kwargs = _engine_kwargs(model, config) | dict(max_num_seqs=4, max_num_batched_tokens=4096)
+    configured_sizes = os.environ.get("VLLM_GR_TEST_ONLINE_BATCH_SIZES")
+    sizes = (1, 2, 4) if configured_sizes is None else tuple(json.loads(configured_sizes))
+    if configured_sizes is not None:
+        config["beam"]["online_batch_sizes"] = list(sizes)
+    kwargs = _engine_kwargs(model, config) | dict(
+        max_num_seqs=max(sizes), max_num_batched_tokens=4096
+    )
     args = AsyncEngineArgs(additional_config={"vllm_gr": config}, **kwargs)
     async with build_async_engine_client_from_engine_args(args) as engine:
         models = OpenAIServingModels(
@@ -498,7 +502,7 @@ async def _run_online_completion_batch(work_dir: Path) -> None:
             tokenizer.encode(f"slot {i}", add_special_tokens=False)
             + newline * (i * 16)
             + source[-256:]
-            for i in range(4)
+            for i in range(max(sizes))
         ]
         body = {
             "model": model,
@@ -519,7 +523,7 @@ async def _run_online_completion_batch(work_dir: Path) -> None:
             transport=httpx.ASGITransport(app=app), base_url="http://test"
         ) as client:
             # A size this route forms runs as one session holding every prompt.
-            for count in (2, 4):
+            for count in (size for size in sizes if size > 1):
                 assert await engine.reset_prefix_cache()
                 before = len((await engine.collective_rpc("onerec_v1_st_events"))[0])
                 response = await client.post(
@@ -544,12 +548,18 @@ async def _run_online_completion_batch(work_dir: Path) -> None:
 
 @pytest.mark.slow
 @pytest.mark.timeout(660)
-def test_onerec_v1_completion_batch_online(tmp_path: Path) -> None:
+@pytest.mark.parametrize("batch_sizes", [None, (1, 3, 7)], ids=["default", "custom"])
+def test_onerec_v1_completion_batch_online(
+    tmp_path: Path, batch_sizes: tuple[int, ...] | None
+) -> None:
     import torch
 
     if not torch.cuda.is_available():
         pytest.skip("OneRec completion batching ST requires CUDA")
     env = dict(os.environ)
+    env.pop("VLLM_GR_TEST_ONLINE_BATCH_SIZES", None)
+    if batch_sizes is not None:
+        env["VLLM_GR_TEST_ONLINE_BATCH_SIZES"] = json.dumps(batch_sizes)
     env.update(
         USE_TF="0",
         VLLM_USE_V2_MODEL_RUNNER="0",

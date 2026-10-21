@@ -31,6 +31,7 @@ def capture_runtime(monkeypatch: pytest.MonkeyPatch) -> CaptureRuntime:
             beam_max_width=4,
             beam_worker_decision=True,
             beam_graph_enabled=True,
+            beam_online_batch_sizes=(1, 2, 4),
             constraint_table=SimpleNamespace(enabled=True),
         ),
         _gr_async_decode_graph_capture_failed=False,
@@ -267,7 +268,7 @@ def test_repeated_startup_accepts_only_completed_capture(
 def test_decode_graph_capture_failure_falls_back_only_when_recorded() -> None:
     worker = SimpleNamespace(
         model_config=SimpleNamespace(enforce_eager=False),
-        _vllm_gr_config=SimpleNamespace(beam_graph_enabled=True),
+        _vllm_gr_config=SimpleNamespace(beam_graph_enabled=True, beam_online_batch_sizes=(1, 2, 4)),
         _gr_async_decode_graph_capture_failed=True,
     )
     assert stages.should_replay_decode_graph(worker, graph=None) is False
@@ -298,7 +299,7 @@ def test_startup_batch_plan_is_selected_by_entry_not_environment(
     monkeypatch.setattr(startup, "_capture_batch", capture)
     entry = capture_multibatch_forward if v2 else startup.capture_async_forward
     assert entry(worker)
-    assert [call.args[1] for call in capture.call_args_list] == ([1, 2, 3, 4] if v2 else [4])
+    assert [call.args[1] for call in capture.call_args_list] == ([1, 2, 4] if v2 else [4])
     assert hasattr(worker, "_gr_decode_capture_failures") is v2
 
 
@@ -308,7 +309,7 @@ def test_missing_decode_graph_is_lazy_only_for_v1(v2: bool) -> None:
     graph.capture = Mock(side_effect=lambda *args, **kwargs: setattr(graph, "ready", True))
     worker = SimpleNamespace(
         model_config=SimpleNamespace(enforce_eager=False),
-        _vllm_gr_config=SimpleNamespace(beam_graph_enabled=True),
+        _vllm_gr_config=SimpleNamespace(beam_graph_enabled=True, beam_online_batch_sizes=(1, 2, 4)),
         model=SimpleNamespace(compute_logits=Mock(return_value="logits")),
     )
     owner = SimpleNamespace(
@@ -331,6 +332,29 @@ def test_missing_decode_graph_is_lazy_only_for_v1(v2: bool) -> None:
         graph.replay.assert_called_once()
 
 
+@pytest.mark.parametrize("sizes", [(1, 2, 4), (1, 3, 7), (1, 6, 8)])  # type: ignore[misc]
+def test_v2_decode_captures_only_configured_batches(
+    capture_runtime: CaptureRuntime, monkeypatch: pytest.MonkeyPatch, sizes: tuple[int, ...]
+) -> None:
+    from vllm_gr.v1.worker.gpu_beam_stage_runner_v2 import should_replay_decode_graph_v2
+
+    worker = capture_runtime[0]
+    worker.vllm_config.scheduler_config.max_num_seqs = 8
+    worker._vllm_gr_config.beam_online_batch_sizes = sizes
+    capture = Mock(return_value=None)
+    monkeypatch.setattr(startup, "_capture_batch", capture)
+    assert capture_multibatch_forward(worker)
+    assert [call.args[1] for call in capture.call_args_list] == list(sizes)
+    for batch in range(1, 9):
+        if batch in sizes:
+            with pytest.raises(RuntimeError, match="successful startup capture"):
+                should_replay_decode_graph_v2(worker, None, batch_size=batch)
+        else:
+            assert not should_replay_decode_graph_v2(worker, None, batch_size=batch)
+            with pytest.raises(RuntimeError, match="Unconfigured Decode shape"):
+                should_replay_decode_graph_v2(worker, object(), batch_size=batch)
+
+
 def test_startup_failure_is_local_to_batch(
     capture_runtime: CaptureRuntime, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -348,7 +372,7 @@ def test_startup_failure_is_local_to_batch(
 
     monkeypatch.setattr(startup, "_capture_batch", capture)
     assert capture_multibatch_forward(worker)
-    assert captured == [1, 2, 3, 4]
+    assert captured == [1, 2, 4]
     assert worker._gr_decode_capture_failures == {2: "capture unsupported"}
     assert not worker._gr_async_decode_graph_capture_failed
     assert not should_replay_decode_graph(worker, None, batch_size=2)

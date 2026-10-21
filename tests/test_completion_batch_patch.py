@@ -33,6 +33,7 @@ class _ModeStub:
     """Stand-in for ``GRConfig`` that reports whatever mode a test sets."""
 
     beam_execution_mode = BeamExecutionMode.V1
+    beam_online_batch_sizes = (1, 2, 4)
 
     @classmethod
     def from_vllm_config(cls, vllm_config: object) -> _ModeStub:
@@ -382,6 +383,35 @@ def test_a_batch_renders_once_and_submits_once(
         "cmpl-request-0",
         4,
     )
+
+
+@pytest.mark.parametrize("count", [2, 3, 7, 8])  # type: ignore[misc]
+def test_explicit_batch_policy_selects_fixed_http_sizes(
+    make_serving: Callable[..., _BatchSelf],
+    make_request: Callable[..., Any],
+    delegate: list[Any],
+    monkeypatch: pytest.MonkeyPatch,
+    count: int,
+) -> None:
+    from vllm_gr.config import GRConfig
+
+    monkeypatch.setattr(patch_module, "GRConfig", GRConfig)
+    serving = make_serving(
+        engine_inputs=list(range(count)), prompt_lengths=dict.fromkeys(range(count), 10)
+    )
+    serving.engine_client.vllm_config.additional_config = {
+        "vllm_gr_beam_execution_mode": "v1",
+        "vllm_gr_beam_online_batch_sizes": [1, 3, 7],
+    }
+    request = make_request(prompt=["a"] * count)
+    result = asyncio.run(create_completion_batch_dispatch(serving, request))
+    if count in (3, 7):
+        assert result == f"response-for-{count}"
+        assert [call["prompt"] for call in serving.beam_calls] == [list(range(count))]
+        assert not delegate
+    else:
+        assert result == "original" and delegate == [request]
+        assert not serving.beam_calls and serving.render_calls == 0
 
 
 def test_the_batch_runs_the_shared_per_prompt_budget(

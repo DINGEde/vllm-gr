@@ -30,7 +30,7 @@ from vllm.entrypoints.openai.engine.protocol import (
 from vllm.entrypoints.utils import get_max_tokens
 from vllm.renderers.inputs.preprocess import prompt_to_seq
 
-from vllm_gr.config import DEFAULT_ONLINE_BATCH_SIZES, BeamExecutionMode, GRConfig
+from vllm_gr.config import BeamExecutionMode, GRConfig
 from vllm_gr.logger import init_logger
 from vllm_gr.v1.beam.batch_contracts import SUPPORTED_BEAM_BATCH_SIZES
 
@@ -42,11 +42,6 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 _COMPLETION_BATCH_PATCH_MARKER = "_vllm_gr_completion_batch_patch"
-
-# The sizes this route forms itself. A single prompt is not a batch: it is one
-# session either way, so it keeps running the upstream body rather than an
-# equivalent copy of it.
-_FIXED_BATCH_SIZES = tuple(size for size in DEFAULT_ONLINE_BATCH_SIZES if size > 1)
 
 # Filled in by ``patch_completion_batch``. Kept module-level so the wrapper has
 # exactly one referent: the function object the route resolved when it was
@@ -281,14 +276,15 @@ async def create_completion_batch_dispatch(
     count = _batch_size(self, request)
     if count is None:
         return await _original_create_completion(self, request, raw_request)
-    if count not in _FIXED_BATCH_SIZES:
+    sizes = GRConfig.from_vllm_config(self.engine_client.vllm_config).beam_online_batch_sizes
+    if count not in sizes:
         return await _decline(
             self,
             request,
             raw_request,
             count,
             f"prompt count {count} is not one of the supported fixed batch sizes "
-            f"{list(_FIXED_BATCH_SIZES)}",
+            f"{[size for size in sizes if size > 1]}",
         )
 
     result = await self.render_completion_request(request)

@@ -12,6 +12,7 @@ import pytest
 
 from vllm_gr.config import (
     CONSTRAINT_TABLE_FORMAT,
+    DEFAULT_ONLINE_BATCH_SIZES,
     ConstraintBackend,
     ConstraintTableBackendEnum,
     ConstraintTableConfig,
@@ -74,6 +75,86 @@ def test_canonical_graph_batch_shape_round_trip(tmp_path: Path) -> None:
 
     assert config.beam_graph_batch_size == 2
     assert gr_config_to_mapping(config) == raw
+
+
+@pytest.mark.parametrize("sizes", [[1], [1, 3, 7], list(range(1, 9))])  # type: ignore[misc]
+def test_online_batch_sizes_round_trip(sizes: list[int], tmp_path: Path) -> None:
+    raw = _canonical_mapping(str(tmp_path / "table.safetensors"))
+    beam = raw["beam"]
+    assert isinstance(beam, dict)
+    beam["online_batch_sizes"] = sizes
+    config = gr_config_from_mapping(raw)
+    assert config.beam_online_batch_sizes == tuple(sizes)
+    assert gr_config_to_mapping(config) == raw
+    host = SimpleNamespace(additional_config={})
+    write_canonical_gr_config(host, config)
+    assert GRConfig.from_vllm_config(host).beam_online_batch_sizes == tuple(sizes)
+
+
+def test_online_batch_sizes_default_and_normalization() -> None:
+    assert GRConfig().beam_online_batch_sizes == DEFAULT_ONLINE_BATCH_SIZES == (1, 2, 4)
+    assert GRConfig(beam_online_batch_sizes=(7, 1, 3)).beam_online_batch_sizes == (1, 3, 7)
+
+
+@pytest.mark.parametrize("max_num_seqs", [1, 2, 3])  # type: ignore[misc]
+def test_default_online_policy_preserves_smaller_engine_capacity(
+    monkeypatch: pytest.MonkeyPatch, max_num_seqs: int
+) -> None:
+    from vllm_gr.engine import arg_utils_gr
+
+    host = SimpleNamespace(
+        additional_config={}, scheduler_config=SimpleNamespace(max_num_seqs=max_num_seqs)
+    )
+    monkeypatch.setattr(arg_utils_gr, "origin_create_engine_config", lambda *args: host)
+    monkeypatch.setattr(arg_utils_gr, "_is_npu_platform", lambda: False)
+    monkeypatch.setattr(arg_utils_gr, "_is_cuda_platform", lambda: False)
+    assert arg_utils_gr.create_engine_config(SimpleNamespace()) is host
+    assert host.scheduler_config.max_num_seqs == max_num_seqs
+    assert GRConfig.from_vllm_config(host).beam_online_batch_sizes == (1, 2, 4)
+
+
+@pytest.mark.parametrize(  # type: ignore[misc]
+    "sizes",
+    [None, [], [3, 7], [1, 1], [True, 3], [1, False], [1, 3.0], [1, "3"], [1, 0], [1, 9], "1,3,7"],
+)
+def test_invalid_online_batch_sizes_fail_during_config_parsing(
+    sizes: object, tmp_path: Path
+) -> None:
+    raw = _canonical_mapping(str(tmp_path / "table.safetensors"))
+    beam = raw["beam"]
+    assert isinstance(beam, dict)
+    beam["online_batch_sizes"] = sizes
+    with pytest.raises(ValueError, match="online_batch_sizes"):
+        gr_config_from_mapping(raw)
+    with pytest.raises(ValueError, match="online_batch_sizes"):
+        GRConfig.from_vllm_config(
+            SimpleNamespace(additional_config={"vllm_gr_beam_online_batch_sizes": sizes})
+        )
+
+
+@pytest.mark.parametrize("max_num_seqs", [4, 7, 8])  # type: ignore[misc]
+def test_engine_creation_preserves_online_batch_policy(
+    monkeypatch: pytest.MonkeyPatch, max_num_seqs: int
+) -> None:
+    from vllm_gr.engine import arg_utils_gr
+
+    host = SimpleNamespace(
+        additional_config={"vllm_gr_beam_online_batch_sizes": [1, 3, 7]},
+        scheduler_config=SimpleNamespace(max_num_seqs=max_num_seqs),
+    )
+    monkeypatch.setattr(arg_utils_gr, "origin_create_engine_config", lambda *args: host)
+    monkeypatch.setattr(arg_utils_gr, "_is_npu_platform", lambda: False)
+    monkeypatch.setattr(arg_utils_gr, "_is_cuda_platform", lambda: False)
+    if max_num_seqs < 7:
+        with pytest.raises(ValueError, match="online_batch_sizes exceeds max_num_seqs"):
+            arg_utils_gr.create_engine_config(SimpleNamespace())
+        assert host.scheduler_config.max_num_seqs == max_num_seqs
+        return
+    assert arg_utils_gr.create_engine_config(SimpleNamespace()) is host
+    assert GRConfig.from_vllm_config(host).beam_online_batch_sizes == (1, 3, 7)
+    GRConfig().write_to_vllm_config(host)
+    assert "vllm_gr_beam_online_batch_sizes" not in host.additional_config
+    assert GRConfig.from_vllm_config(host).beam_online_batch_sizes == (1, 2, 4)
 
 
 def test_canonical_write_invalidates_cached_defaults_for_uniproc(tmp_path: Path) -> None:

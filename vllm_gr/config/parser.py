@@ -10,6 +10,7 @@ from typing import Final, TypeAlias, cast
 from vllm_gr.config.models import (
     _BEAM_MAX_DECODE_STEPS_DEFAULT,
     CONSTRAINT_TABLE_FORMAT,
+    DEFAULT_ONLINE_BATCH_SIZES,
     GR_CONFIG_SCHEMA_VERSION,
     BeamExecutionMode,
     ConstraintBackend,
@@ -25,6 +26,7 @@ from vllm_gr.config.validation import (
     validate_beam_graph_enabled,
     validate_beam_max_decode_steps,
     validate_beam_max_width,
+    validate_beam_online_batch_sizes,
     validate_beam_worker_decision,
     validate_catalog_path,
     validate_constraint_backend,
@@ -51,6 +53,7 @@ VOCAB_SLICE_SIZE_KEY: Final = "vllm_gr_vocab_slice_size"
 SHORT_SUFFIX_ATTENTION_KEY: Final = "vllm_gr_enable_short_suffix_attention"
 BEAM_GRAPH_ENABLED_KEY: Final = "vllm_gr_beam_graph_enabled"
 BEAM_GRAPH_BATCH_SIZE_KEY: Final = "vllm_gr_beam_graph_batch_size"
+BEAM_ONLINE_BATCH_SIZES_KEY: Final = "vllm_gr_beam_online_batch_sizes"
 BEAM_MAX_WIDTH_KEY: Final = "vllm_gr_beam_max_width"
 BEAM_MAX_DECODE_STEPS_KEY: Final = "vllm_gr_beam_max_decode_steps"
 NPU_DECODE_EXECUTION_KEY: Final = "vllm_gr_npu_decode_execution"
@@ -68,6 +71,7 @@ KNOWN_GR_CONFIG_KEYS: Final = frozenset(
         BEAM_GRAPH_ENABLED_KEY,
         SHORT_SUFFIX_ATTENTION_KEY,
         BEAM_GRAPH_BATCH_SIZE_KEY,
+        BEAM_ONLINE_BATCH_SIZES_KEY,
         BEAM_MAX_WIDTH_KEY,
         BEAM_MAX_DECODE_STEPS_KEY,
         NPU_DECODE_EXECUTION_KEY,
@@ -84,6 +88,7 @@ _BEAM_KEYS: Final = frozenset(
         "graph_enabled",
         "enable_short_suffix_attention",
         "graph_batch_size",
+        "online_batch_sizes",
         "max_width",
         "max_decode_steps",
         "worker_decision",
@@ -193,6 +198,9 @@ def gr_config_from_mapping(
             beam_raw.get("enable_short_suffix_attention", False)
         ),
         beam_graph_batch_size=validate_beam_graph_batch_size(beam_raw.get("graph_batch_size", 1)),
+        beam_online_batch_sizes=validate_beam_online_batch_sizes(
+            beam_raw.get("online_batch_sizes", DEFAULT_ONLINE_BATCH_SIZES)
+        ),
         beam_max_width=validate_beam_max_width(beam_raw.get("max_width")),
         beam_max_decode_steps=validate_beam_max_decode_steps(
             beam_raw.get("max_decode_steps", _BEAM_MAX_DECODE_STEPS_DEFAULT)
@@ -244,6 +252,8 @@ def gr_config_to_mapping(config: GRConfig) -> dict[str, object]:
         beam["enable_short_suffix_attention"] = True
     if config.beam_graph_batch_size != 1:
         beam["graph_batch_size"] = config.beam_graph_batch_size
+    if config.beam_online_batch_sizes != DEFAULT_ONLINE_BATCH_SIZES:
+        beam["online_batch_sizes"] = list(config.beam_online_batch_sizes)
     # Keep omitted values omitted so existing schema-v1 artifacts round-trip
     # byte-for-byte at the mapping level.  Explicit False is significant: it
     # is the CUDA runtime-default opt-out and must survive Driver -> Worker
@@ -351,6 +361,9 @@ def parse_gr_config(vllm_config: object | None) -> GRConfig:
         beam_graph_batch_size=validate_beam_graph_batch_size(
             additional_config.get(BEAM_GRAPH_BATCH_SIZE_KEY, 1)
         ),
+        beam_online_batch_sizes=validate_beam_online_batch_sizes(
+            additional_config.get(BEAM_ONLINE_BATCH_SIZES_KEY, DEFAULT_ONLINE_BATCH_SIZES)
+        ),
         beam_max_width=validate_beam_max_width(additional_config.get(BEAM_MAX_WIDTH_KEY)),
         beam_max_decode_steps=validate_beam_max_decode_steps(
             additional_config.get(BEAM_MAX_DECODE_STEPS_KEY, _BEAM_MAX_DECODE_STEPS_DEFAULT)
@@ -436,6 +449,11 @@ def write_gr_config(vllm_config: object, gr_config: GRConfig) -> None:
         additional_config.pop(BEAM_MAX_WIDTH_KEY, None)
     else:
         additional_config[BEAM_MAX_WIDTH_KEY] = gr_config.beam_max_width
+
+    if gr_config.beam_online_batch_sizes == DEFAULT_ONLINE_BATCH_SIZES:
+        additional_config.pop(BEAM_ONLINE_BATCH_SIZES_KEY, None)
+    else:
+        additional_config[BEAM_ONLINE_BATCH_SIZES_KEY] = list(gr_config.beam_online_batch_sizes)
 
     if gr_config.beam_max_decode_steps == _BEAM_MAX_DECODE_STEPS_DEFAULT:
         additional_config.pop(BEAM_MAX_DECODE_STEPS_KEY, None)

@@ -12,6 +12,7 @@ from vllm.engine.arg_utils import EngineArgs
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 
 from vllm_gr.config import (
+    DEFAULT_ONLINE_BATCH_SIZES,
     BeamExecutionMode,
     ConstraintBackend,
     GRAttentionBackend,
@@ -636,6 +637,17 @@ def create_engine_config(self, usage_context=None, headless=False):
         raise ValueError(
             "ModelRunner V2 Beam requires beam.execution_mode='v1'; "
             "select it explicitly before engine initialization, or use ModelRunner V1"
+        )
+
+    max_num_seqs = getattr(getattr(config, "scheduler_config", None), "max_num_seqs", None)
+    if (
+        effective_gr_config.beam_online_batch_sizes != DEFAULT_ONLINE_BATCH_SIZES
+        and max_num_seqs is not None
+        and max(effective_gr_config.beam_online_batch_sizes) > max_num_seqs
+    ):
+        raise ValueError(
+            "beam.online_batch_sizes exceeds max_num_seqs; increase the explicit "
+            "sequence capacity or select smaller batch sizes"
         )
 
     if effective_gr_config != existing_gr_config or canonical_input is not None:
