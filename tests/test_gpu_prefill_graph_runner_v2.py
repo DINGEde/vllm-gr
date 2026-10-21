@@ -25,7 +25,11 @@ from vllm_gr.v1.worker.prefill_graph_common import PrefillGraphEnv
 @pytest.fixture  # type: ignore[misc]
 def runner(monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
     monkeypatch.setattr(PrefillGraphEnv, "enabled", True)
-    for name in (common.ENV_PREFILL_GRAPH_BUCKET_STEP, common.ENV_PREFILL_GRAPH_MAX_BUCKET):
+    for name in (
+        common.ENV_PREFILL_GRAPH_BUCKET_STEP,
+        common.ENV_PREFILL_GRAPH_MAX_BUCKET,
+        common.ENV_PREFILL_GRAPH_CAPTURE_NUM_REQS,
+    ):
         monkeypatch.delenv(name, raising=False)
     parallel = SimpleNamespace(
         tensor_parallel_size=1,
@@ -109,6 +113,42 @@ def fake_capture(
     return observed
 
 
+@pytest.mark.parametrize(  # type: ignore[misc]
+    "sizes,max_seqs,expected",
+    [
+        (None, 1, {1}),
+        (None, 3, {1, 2}),
+        (None, 8, {1, 2, 4}),
+        ((1, 3, 7), 7, {1, 3, 7}),
+        ((1, 6, 8), 8, {1, 6, 8}),
+    ],
+)
+def test_capture_policy_is_not_engine_capacity(
+    runner: SimpleNamespace, sizes: tuple[int, ...] | None, max_seqs: int, expected: set[int]
+) -> None:
+    runner.scheduler_config.max_num_seqs = max_seqs
+    runner.cudagraph_manager.compilation_config.cudagraph_capture_sizes = [128]
+    if sizes is not None:
+        runner.vllm_config.additional_config = {"vllm_gr_beam_online_batch_sizes": list(sizes)}
+    plan = pg2.PrefillCapturePlan.for_runner(runner)
+    assert set(plan.batch_sizes) == expected
+    assert {d.num_reqs for d in plan.descriptors()[Mode.FULL]} == expected
+
+
+@pytest.mark.parametrize("override", ["1,2,4", "3,7", "8"])  # type: ignore[misc]
+def test_prefill_capture_override_is_independent_of_online_policy(
+    runner: SimpleNamespace, monkeypatch: pytest.MonkeyPatch, override: str
+) -> None:
+    runner.vllm_config.additional_config = {"vllm_gr_beam_online_batch_sizes": [1, 3, 7]}
+    runner.cudagraph_manager.compilation_config.cudagraph_capture_sizes = [128]
+    monkeypatch.setenv(common.ENV_PREFILL_GRAPH_CAPTURE_NUM_REQS, override)
+    plan = pg2.PrefillCapturePlan.for_runner(runner)
+    expected = {int(b) for b in override.split(",") if int(b) <= 4}
+    assert {d.num_reqs for d in plan.descriptors()[Mode.FULL]} == expected
+    assert plan.descriptors()[Mode.PIECEWISE]
+    assert runner.scheduler_config.max_num_seqs == 4
+
+
 def test_plan_preserves_native_capture_budget(
     runner: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -122,7 +162,7 @@ def test_plan_preserves_native_capture_budget(
     assert [d.num_tokens for d in descs[Mode.FULL] if d.num_reqs == 1] == list(
         reversed(plan.buckets)
     )
-    assert {d.num_reqs for d in descs[Mode.FULL]} == {1, 2, 3, 4}
+    assert {d.num_reqs for d in descs[Mode.FULL]} == {1, 2, 4}
     assert all(
         d.num_tokens >= d.num_reqs and d.uniform_token_count is None for d in descs[Mode.FULL]
     )
@@ -185,7 +225,9 @@ def test_v2_native_capture_sizes_do_not_change_v1_grid(
     monkeypatch.setattr(
         GRConfig,
         "from_vllm_config",
-        lambda _: SimpleNamespace(beam_execution_mode=BeamExecutionMode.V1),
+        lambda _: SimpleNamespace(
+            beam_execution_mode=BeamExecutionMode.V1, beam_online_batch_sizes=(1, 2, 4)
+        ),
     )
     runner.device = torch.device("cpu")
     runner.model_config.max_model_len = 1000

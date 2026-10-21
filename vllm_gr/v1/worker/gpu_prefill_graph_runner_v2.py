@@ -24,13 +24,13 @@ from vllm.v1.worker.gpu.cudagraph_utils import (
     ModelCudaGraphManager,
 )
 
-from vllm_gr.v1.beam.batch_contracts import SUPPORTED_BEAM_BATCH_SIZES
 from vllm_gr.v1.worker.cudagraph_capture import is_recoverable_capture_error
 from vllm_gr.v1.worker.prefill_graph_common import (
     ENV_PREFILL_GRAPH_BUCKET_STEP,
     ENV_PREFILL_GRAPH_MAX_BUCKET,
     get_default_buckets,
     get_max_context_len,
+    get_prefill_graph_capture_num_reqs,
     is_prefill_graph_enabled,
 )
 
@@ -117,11 +117,20 @@ class PrefillCapturePlan:
     def for_runner(cls, runner: Any) -> PrefillCapturePlan:
         manager = runner.cudagraph_manager
         batch_sizes = tuple(
-            b for b in SUPPORTED_BEAM_BATCH_SIZES if b <= runner.scheduler_config.max_num_seqs
+            b
+            for b in get_prefill_graph_capture_num_reqs(runner.vllm_config)
+            if b <= runner.scheduler_config.max_num_seqs
         )
         context = get_max_context_len(runner)
         token_limit = runner.scheduler_config.max_num_batched_tokens
-        limit = min(token_limit, max(batch_sizes) * context) if context else token_limit
+        limit = (
+            min(
+                token_limit,
+                max(batch_sizes, default=runner.scheduler_config.max_num_seqs) * context,
+            )
+            if context
+            else token_limit
+        )
         buckets = tuple(
             sorted({size for size in get_gpu_prefill_buckets(runner) if 0 < size <= limit})
         )

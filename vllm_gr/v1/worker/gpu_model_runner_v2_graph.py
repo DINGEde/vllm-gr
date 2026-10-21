@@ -58,8 +58,7 @@ __all__ = ["make_patched_capture_model_v2"]
 
 @torch.inference_mode()
 def capture_multibatch_forward(worker: Any, *, allow_eager_fallback: bool = True) -> bool:
-    """Publish all admitted V2 Decode shapes, with shape-local fallback."""
-    from vllm_gr.v1.beam.batch_contracts import SUPPORTED_BEAM_BATCH_SIZES
+    """Publish configured V2 Decode shapes, with shape-local fallback."""
     from vllm_gr.v1.worker.gpu_beam_stage_runner_v2 import V2StageExecutionHooks
     from vllm_gr.v1.worker.gr_startup import _capture_batch, _capture_enabled
 
@@ -67,7 +66,7 @@ def capture_multibatch_forward(worker: Any, *, allow_eager_fallback: bool = True
         return False
     cfg = _get_gr_config(worker)
     max_reqs = worker.vllm_config.scheduler_config.max_num_seqs
-    batches = tuple(b for b in SUPPORTED_BEAM_BATCH_SIZES if b <= max_reqs)
+    batches = tuple(b for b in cfg.beam_online_batch_sizes if b <= max_reqs)
     if hasattr(worker, "_gr_decode_capture_failures"):
         owner = getattr(worker, "_gr_gpu_stage_runner", None)
         if owner is None or not owner.closed:

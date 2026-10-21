@@ -445,15 +445,15 @@ def write_gr_config(vllm_config: object, gr_config: GRConfig) -> None:
     else:
         additional_config[BEAM_GRAPH_BATCH_SIZE_KEY] = gr_config.beam_graph_batch_size
 
-    if gr_config.beam_online_batch_sizes == DEFAULT_ONLINE_BATCH_SIZES:
-        additional_config.pop(BEAM_ONLINE_BATCH_SIZES_KEY, None)
-    else:
-        additional_config[BEAM_ONLINE_BATCH_SIZES_KEY] = list(gr_config.beam_online_batch_sizes)
-
     if gr_config.beam_max_width is None:
         additional_config.pop(BEAM_MAX_WIDTH_KEY, None)
     else:
         additional_config[BEAM_MAX_WIDTH_KEY] = gr_config.beam_max_width
+
+    if gr_config.beam_online_batch_sizes == DEFAULT_ONLINE_BATCH_SIZES:
+        additional_config.pop(BEAM_ONLINE_BATCH_SIZES_KEY, None)
+    else:
+        additional_config[BEAM_ONLINE_BATCH_SIZES_KEY] = list(gr_config.beam_online_batch_sizes)
 
     if gr_config.beam_max_decode_steps == _BEAM_MAX_DECODE_STEPS_DEFAULT:
         additional_config.pop(BEAM_MAX_DECODE_STEPS_KEY, None)

@@ -96,6 +96,23 @@ def test_online_batch_sizes_default_and_normalization() -> None:
     assert GRConfig(beam_online_batch_sizes=(7, 1, 3)).beam_online_batch_sizes == (1, 3, 7)
 
 
+@pytest.mark.parametrize("max_num_seqs", [1, 2, 3])  # type: ignore[misc]
+def test_default_online_policy_preserves_smaller_engine_capacity(
+    monkeypatch: pytest.MonkeyPatch, max_num_seqs: int
+) -> None:
+    from vllm_gr.engine import arg_utils_gr
+
+    host = SimpleNamespace(
+        additional_config={}, scheduler_config=SimpleNamespace(max_num_seqs=max_num_seqs)
+    )
+    monkeypatch.setattr(arg_utils_gr, "origin_create_engine_config", lambda *args: host)
+    monkeypatch.setattr(arg_utils_gr, "_is_npu_platform", lambda: False)
+    monkeypatch.setattr(arg_utils_gr, "_is_cuda_platform", lambda: False)
+    assert arg_utils_gr.create_engine_config(SimpleNamespace()) is host
+    assert host.scheduler_config.max_num_seqs == max_num_seqs
+    assert GRConfig.from_vllm_config(host).beam_online_batch_sizes == (1, 2, 4)
+
+
 @pytest.mark.parametrize(  # type: ignore[misc]
     "sizes",
     [None, [], [3, 7], [1, 1], [True, 3], [1, False], [1, 3.0], [1, "3"], [1, 0], [1, 9], "1,3,7"],
@@ -113,6 +130,31 @@ def test_invalid_online_batch_sizes_fail_during_config_parsing(
         GRConfig.from_vllm_config(
             SimpleNamespace(additional_config={"vllm_gr_beam_online_batch_sizes": sizes})
         )
+
+
+@pytest.mark.parametrize("max_num_seqs", [4, 7, 8])  # type: ignore[misc]
+def test_engine_creation_preserves_online_batch_policy(
+    monkeypatch: pytest.MonkeyPatch, max_num_seqs: int
+) -> None:
+    from vllm_gr.engine import arg_utils_gr
+
+    host = SimpleNamespace(
+        additional_config={"vllm_gr_beam_online_batch_sizes": [1, 3, 7]},
+        scheduler_config=SimpleNamespace(max_num_seqs=max_num_seqs),
+    )
+    monkeypatch.setattr(arg_utils_gr, "origin_create_engine_config", lambda *args: host)
+    monkeypatch.setattr(arg_utils_gr, "_is_npu_platform", lambda: False)
+    monkeypatch.setattr(arg_utils_gr, "_is_cuda_platform", lambda: False)
+    if max_num_seqs < 7:
+        with pytest.raises(ValueError, match="online_batch_sizes exceeds max_num_seqs"):
+            arg_utils_gr.create_engine_config(SimpleNamespace())
+        assert host.scheduler_config.max_num_seqs == max_num_seqs
+        return
+    assert arg_utils_gr.create_engine_config(SimpleNamespace()) is host
+    assert GRConfig.from_vllm_config(host).beam_online_batch_sizes == (1, 3, 7)
+    GRConfig().write_to_vllm_config(host)
+    assert "vllm_gr_beam_online_batch_sizes" not in host.additional_config
+    assert GRConfig.from_vllm_config(host).beam_online_batch_sizes == (1, 2, 4)
 
 
 def test_canonical_write_invalidates_cached_defaults_for_uniproc(tmp_path: Path) -> None:
@@ -316,21 +358,6 @@ def test_engine_creation_preserves_flat_graph_batch_size(
     assert arg_utils_gr.create_engine_config(SimpleNamespace()) is config
     assert GRConfig.from_vllm_config(config).beam_graph_batch_size == batch_size
     assert config.additional_config.get("vllm_gr_beam_graph_batch_size", 1) == batch_size
-
-
-def test_engine_creation_preserves_online_batch_policy(monkeypatch: pytest.MonkeyPatch) -> None:
-    from vllm_gr.engine import arg_utils_gr
-
-    host = SimpleNamespace(additional_config={"vllm_gr_beam_online_batch_sizes": [1, 3, 7]})
-    monkeypatch.setattr(arg_utils_gr, "origin_create_engine_config", lambda *args: host)
-    monkeypatch.setattr(arg_utils_gr, "_is_npu_platform", lambda: False)
-    monkeypatch.setattr(arg_utils_gr, "_is_cuda_platform", lambda: False)
-    assert arg_utils_gr.create_engine_config(SimpleNamespace()) is host
-    assert GRConfig.from_vllm_config(host).beam_online_batch_sizes == (1, 3, 7)
-    assert host.additional_config["vllm_gr_beam_online_batch_sizes"] == [1, 3, 7]
-    GRConfig().write_to_vllm_config(host)
-    assert "vllm_gr_beam_online_batch_sizes" not in host.additional_config
-    assert GRConfig.from_vllm_config(host).beam_online_batch_sizes == (1, 2, 4)
 
 
 def test_engine_creation_writes_enabled_canonical_config(

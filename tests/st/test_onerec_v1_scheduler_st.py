@@ -470,9 +470,13 @@ async def _run_online_completion_batch(work_dir: Path) -> None:
 
     initialize_runtime()
     model, tokenizer, config, source, newline, _legal = _inputs(work_dir)
-    # Capacity only: the same engine configuration as the cases above, sized so
-    # that a four-prompt list can be resident at once.
-    kwargs = _engine_kwargs(model, config) | dict(max_num_seqs=4, max_num_batched_tokens=4096)
+    configured_sizes = os.environ.get("VLLM_GR_TEST_ONLINE_BATCH_SIZES")
+    sizes = (1, 2, 4) if configured_sizes is None else tuple(json.loads(configured_sizes))
+    if configured_sizes is not None:
+        config["beam"]["online_batch_sizes"] = list(sizes)
+    kwargs = _engine_kwargs(model, config) | dict(
+        max_num_seqs=max(sizes), max_num_batched_tokens=4096
+    )
     args = AsyncEngineArgs(additional_config={"vllm_gr": config}, **kwargs)
     async with build_async_engine_client_from_engine_args(args) as engine:
         models = OpenAIServingModels(
@@ -497,13 +501,12 @@ async def _run_online_completion_batch(work_dir: Path) -> None:
         app = FastAPI()
         app.state.openai_serving_completion = serving
         attach_router(app)
-        # Six, so every list length the cases below post is a real slice rather
-        # than a silent truncation of a shorter one.
+        # Include enough prompts for both exact-size and partitioned cases.
         prompts = [
             tokenizer.encode(f"slot {i}", add_special_tokens=False)
             + newline * (i * 16)
             + source[-256:]
-            for i in range(6)
+            for i in range(max(sizes) + 2)
         ]
         body = {
             "model": model,
@@ -555,7 +558,12 @@ async def _run_online_completion_batch(work_dir: Path) -> None:
             transport=httpx.ASGITransport(app=app), base_url="http://test"
         ) as client:
             # Any list runs, as one session per contiguous batch, largest first.
-            for count, sizes in ((2, [2]), (3, [2, 1]), (4, [4]), (5, [4, 1]), (6, [4, 2])):
+            cases = (
+                ((2, [2]), (3, [2, 1]), (4, [4]), (5, [4, 1]), (6, [4, 2]))
+                if sizes == (1, 2, 4)
+                else ((2, [1, 1]), (3, [3]), (7, [7]), (8, [7, 1]), (9, [7, 1, 1]))
+            )
+            for count, expected_sizes in cases:
                 assert await engine.reset_prefix_cache()
                 before = len((await engine.collective_rpc("onerec_v1_st_events"))[0])
                 data = await post(prompts[:count])
@@ -564,13 +572,18 @@ async def _run_online_completion_batch(work_dir: Path) -> None:
                 assert data["usage"]["prompt_tokens"] == sum(map(len, prompts[:count]))
                 assert data["usage"]["completion_tokens"] == count * _BEAM_WIDTH * 5
                 stages = await stages_since(before)
-                assert [e["size"] for e in stages if e["stage"] == 0] == sizes
+                assert [e["size"] for e in stages if e["stage"] == 0] == expected_sizes
                 # One engine session per batch: the split is real, not a
                 # relabelling of the single-session path.
-                assert len({e["session_id"] for e in stages}) == len(sizes)
+                assert len({e["session_id"] for e in stages}) == len(expected_sizes)
                 await assert_engine_is_clean()
                 rows.append(
-                    dict(count=count, sessions=len(sizes), sizes=sizes, usage=data["usage"])
+                    dict(
+                        count=count,
+                        sessions=len(expected_sizes),
+                        sizes=expected_sizes,
+                        usage=data["usage"],
+                    )
                 )
 
             # Splitting must not change the answer: the same prompts posted on
@@ -578,9 +591,10 @@ async def _run_online_completion_batch(work_dir: Path) -> None:
             assert await engine.reset_prefix_cache()
             batched = await post(prompts[:6])
             assert await engine.reset_prefix_cache()
-            split_manually = (await post(prompts[:4]))["choices"] + (await post(prompts[4:6]))[
-                "choices"
-            ]
+            split_at = 4 if sizes == (1, 2, 4) else 3
+            split_manually = (await post(prompts[:split_at]))["choices"] + (
+                await post(prompts[split_at:6])
+            )["choices"]
             assert [c["text"] for c in batched["choices"]] == [c["text"] for c in split_manually]
             await assert_engine_is_clean()
 
@@ -606,18 +620,32 @@ async def _run_online_completion_batch(work_dir: Path) -> None:
             recovered = await post(prompts[:2])
             assert len(recovered["choices"]) == 2 * _BEAM_WIDTH
             await assert_engine_is_clean()
-            rows.append(dict(count=2, sessions=1, sizes=[2], note="after the abort"))
+            recovered_sizes = [2] if 2 in sizes else [1, 1]
+            rows.append(
+                dict(
+                    count=2,
+                    sessions=len(recovered_sizes),
+                    sizes=recovered_sizes,
+                    note="after the abort",
+                )
+            )
         (work_dir / "completion-batch-evidence.json").write_text(json.dumps(rows, indent=2))
 
 
 @pytest.mark.slow
 @pytest.mark.timeout(660)
-def test_onerec_v1_completion_batch_online(tmp_path: Path) -> None:
+@pytest.mark.parametrize("batch_sizes", [None, (1, 3, 7)], ids=["default", "custom"])
+def test_onerec_v1_completion_batch_online(
+    tmp_path: Path, batch_sizes: tuple[int, ...] | None
+) -> None:
     import torch
 
     if not torch.cuda.is_available():
         pytest.skip("OneRec completion batching ST requires CUDA")
     env = dict(os.environ)
+    env.pop("VLLM_GR_TEST_ONLINE_BATCH_SIZES", None)
+    if batch_sizes is not None:
+        env["VLLM_GR_TEST_ONLINE_BATCH_SIZES"] = json.dumps(batch_sizes)
     env.update(
         USE_TF="0",
         VLLM_USE_V2_MODEL_RUNNER="0",

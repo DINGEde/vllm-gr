@@ -46,16 +46,21 @@ With compatible inputs and sufficient capacity:
 | `[1, 3, 7]` | 8 | 7 + 1 |
 | `[1, 2, 3, 4, 5, 6, 7, 8]` | 8 | 8 |
 
-Only listed sizes are used. With `[1, 3, 7]` and `max_num_seqs=4`, seven inputs
-become `3 + 3 + 1`, not `4 + 3`. The existing batch-plan INFO log reports the
+Only listed sizes are used. A non-default policy exceeding `max_num_seqs`
+is rejected at engine configuration. With `[1, 3]` and `max_num_seqs=4`, seven
+inputs become `3 + 3 + 1`, not `4 + 3`. The batch-plan INFO log reports the
 actual sizes. Output order, serial cleanup and cancellation semantics are
 unchanged. Direct offline/engine batch calls are not repartitioned by this policy.
 
 ## Performance Boundary
 
-This option controls online grouping, not CUDA/NPU graph capture or persistent
-workspace allocation. Enabling a size does not guarantee graph replay for it;
-uncaptured Prefill shapes may execute eagerly. Verify actual execution mode,
+This policy is provided by the fixed-batch foundation PR. It also selects
+default CUDA V1/V2 Prefill request counts and V2 Decode startup capture sizes.
+The Prefill-only environment override remains independent; V1 Decode and NPU
+exact Decode graph settings retain their existing semantics. Persistent
+workspace capacity is independent of this policy. Enabling a size does not
+guarantee graph replay for every shape. See [capture configuration](prefill_graph_capture.md).
+Verify actual execution mode,
 warmup cost, memory use and end-to-end latency before selecting a deployment
 policy. Largest-first packing is not a throughput-optimal search. Changing the
 policy can change numerical outputs because the execution shape changes.

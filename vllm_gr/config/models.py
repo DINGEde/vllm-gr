@@ -166,11 +166,12 @@ class GRConfig:
     # signature dimension, not a scheduler capacity: other B values do not use
     # the Beam FULL graph (native PIECEWISE/NONE dispatch remains available).
     beam_graph_batch_size: int = 1
-    # Online packing policy, not engine capacity or graph capture shapes.
-    beam_online_batch_sizes: tuple[int, ...] = DEFAULT_ONLINE_BATCH_SIZES
 
     enable_short_suffix_attention: bool = False
     """Fuse CUDA suffix attention and prefix merging when explicitly enabled."""
+
+    beam_online_batch_sizes: tuple[int, ...] = DEFAULT_ONLINE_BATCH_SIZES
+    """Online batching policy and default CUDA capture sizes, not engine capacity."""
 
     def __post_init__(self) -> None:
         from vllm_gr.config.validation import (
