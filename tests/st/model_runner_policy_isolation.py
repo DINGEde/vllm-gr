@@ -133,6 +133,30 @@ def check_idle(value: dict[str, Any]) -> None:
     assert not value["decode_failures"]
 
 
+def startup_expectations(
+    *, runner: str, config: dict[str, Any], max_num_seqs: int, enforce_eager: bool
+) -> tuple[int, list[int]]:
+    """Keep persistent Backend capacity separate from the selected graph set."""
+    from vllm_gr.config import gr_config_from_mapping
+
+    cfg = gr_config_from_mapping(config)
+    assert cfg.beam_max_width is not None
+    if runner == "v2":
+        from vllm_gr.v1.beam.batch_contracts import SUPPORTED_BEAM_BATCH_SIZES
+
+        max_batch = max(SUPPORTED_BEAM_BATCH_SIZES)
+        batches = [b for b in cfg.beam_online_batch_sizes if b <= max_num_seqs]
+    else:
+        assert runner == "v1", runner
+        from vllm_gr.v1.worker.gr_startup import _startup_capture_batch_size
+
+        max_batch = 1
+        batches = [_startup_capture_batch_size()]
+    if enforce_eager or not cfg.beam_graph_enabled:
+        batches = []
+    return max_batch * cfg.beam_max_width, batches
+
+
 def run(args: argparse.Namespace) -> None:
     os.environ.update(
         VLLM_USE_V2_MODEL_RUNNER=str(int(args.runner == "v2")),
@@ -162,6 +186,12 @@ def run(args: argparse.Namespace) -> None:
         compilation_config={"cudagraph_capture_sizes": [1, 2, 4, 8, 16, 128, 256, 512, 1024]},
         worker_extension_cls="tests.st.model_runner_policy_isolation.PolicyWorkerExtension",
     )
+    expected_rows, expected_batches = startup_expectations(
+        runner=args.runner,
+        config=config,
+        max_num_seqs=kwargs["max_num_seqs"],
+        enforce_eager=kwargs["enforce_eager"],
+    )
     # Distinct content and unsorted lengths exercise native row reordering.
     prompts = [source[i * 13 : i * 13 + n] for i, n in enumerate((191, 96, 160, 127))]
     assert [len(p) for p in prompts] == [191, 96, 160, 127]
@@ -186,7 +216,7 @@ def run(args: argparse.Namespace) -> None:
         if args.expected_source:
             assert Path(value["source"]).parents[3] == args.expected_source.resolve()
         assert (".gpu.model_runner." in value["runner_class"]) == (args.runner == "v2")
-        assert value["backend_rows"] == width * (4 if args.runner == "v2" else 1)
+        assert value["backend_rows"] == expected_rows
         if args.runner == "v1":
             assert not value["addresses"]
         else:
@@ -259,8 +289,7 @@ def run(args: argparse.Namespace) -> None:
             str(p.relative_to(source_root)): hashlib.sha256(p.read_bytes()).hexdigest()
             for p in sorted((source_root / "vllm_gr").rglob("*.py"))
         }
-        expected = ([1] if args.runner == "v1" else [1, 2, 3, 4]) if args.mode == "graph" else []
-        assert result["initial"]["decode_batches"] == expected
+        assert result["initial"]["decode_batches"] == expected_batches
         llm.collective_rpc("policy_observe")
         for batch in (1, 2, 4, 1, 4, 2):
             assert llm.reset_prefix_cache()

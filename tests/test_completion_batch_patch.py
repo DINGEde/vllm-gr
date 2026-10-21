@@ -24,8 +24,6 @@ from vllm_gr.entrypoints.openai.completion_batch_patch import (
 
 _DECLINED = "Beam batch declined"
 
-# The one input shape every execution test shares unless it says otherwise:
-# four prompts of equal rendered length, so nothing declines for capacity.
 _EQUAL_LENGTHS = dict.fromkeys(range(4), 10)
 
 
@@ -120,11 +118,7 @@ class _BatchSelf:
 
 @pytest.fixture  # type: ignore[misc]
 def make_serving(monkeypatch: pytest.MonkeyPatch) -> Callable[..., _BatchSelf]:
-    """Build the borrowed serving surface with a stubbed budget formula.
-
-    The budget formula belongs to vLLM; what this patch owes is the choice
-    among the per-prompt results, so the input length is the only variable.
-    """
+    """Stub per-prompt budgets; test the real formula separately below."""
 
     def _make(**kwargs: Any) -> _BatchSelf:
         serving = _BatchSelf(
@@ -202,17 +196,6 @@ def _declines(info: Mock) -> list[tuple[str, int, str]]:
     ]
 
 
-# --------------------------------------------------------------------------- #
-# Route selection
-# --------------------------------------------------------------------------- #
-
-
-def test_a_four_prompt_beam_request_is_claimed(
-    serving: _BatchSelf, make_request: Callable[..., Any]
-) -> None:
-    assert _batch_size(serving, make_request()) == 4
-
-
 @pytest.mark.parametrize(  # type: ignore[misc]
     "overrides",
     [
@@ -234,11 +217,7 @@ def test_everything_else_is_left_to_the_original_handler(
 def test_a_prompt_list_is_counted_before_capacity_is_consulted(
     make_serving: Callable[..., _BatchSelf], make_request: Callable[..., Any], count: int
 ) -> None:
-    """Claiming depends on the request alone; the route decides afterwards.
-
-    A count this route cannot form is still counted, so that the decline can
-    name it instead of looking like a request that never asked to batch.
-    """
+    """Count unsupported lists too, so the decline log can identify them."""
     capacity = make_serving(max_num_seqs=2)
     assert _batch_size(capacity, make_request(prompt=["a"] * count)) == count
     assert _batch_size(capacity, make_request(prompt=[[1, 2]] * count)) == count
@@ -252,15 +231,6 @@ def test_a_legacy_engine_is_left_alone(
         assert _batch_size(serving, make_request()) is None
 
 
-# --------------------------------------------------------------------------- #
-# Declines: the original handler runs and the reason is on the record
-# --------------------------------------------------------------------------- #
-
-# Every list this route must not batch, and the reason it owes back for it.
-# The capacity and budget boundaries are rows here rather than tests of their
-# own: the promises are identical, so they are asserted once, below.
-#
-#                 serving kwargs                        request kwargs                 renders  reason
 _DECLINE_CASES = [
     ("count 3", {}, {"prompt": ["a"] * 3}, 0, "not one of the supported fixed batch sizes"),
     ("count 5", {}, {"prompt": ["a"] * 5}, 0, "not one of the supported fixed batch sizes"),
@@ -285,99 +255,54 @@ _DECLINE_CASES = [
 ]
 
 
-@pytest.fixture  # type: ignore[misc]
-def decline(
-    make_serving: Callable[..., _BatchSelf],
-    make_request: Callable[..., Any],
-    delegate: list[Any],
-    logged: Mock,
-) -> Callable[..., tuple[str, int, str]]:
-    """Run a list this route must not batch, and hand back its decline record.
-
-    Every decline owes the same promises, so they are asserted here once
-    rather than in each case: the original handler ran, no session was
-    submitted at all, and the count was logged with a reason.
-    """
-
-    def _run(
-        serving_kwargs: dict[str, Any], request_kwargs: dict[str, Any], renders: int
-    ) -> tuple[str, int, str]:
-        serving = make_serving(**serving_kwargs)
-        request = make_request(**request_kwargs)
-        assert asyncio.run(create_completion_batch_dispatch(serving, request)) == "original"
-        assert delegate == [request]
-        assert serving.beam_calls == []
-        assert serving.render_calls == renders
-        return _declines(logged)[0]
-
-    return _run
-
-
 @pytest.mark.parametrize(  # type: ignore[misc]
     ("case", "serving_kwargs", "request_kwargs", "renders", "reason"),
     _DECLINE_CASES,
     ids=[case for case, *_ in _DECLINE_CASES],
 )
 def test_a_list_that_cannot_batch_runs_the_original_handler(
-    decline: Callable[..., tuple[str, int, str]],
+    make_serving: Callable[..., _BatchSelf],
+    make_request: Callable[..., Any],
+    delegate: list[Any],
+    logged: Mock,
     case: str,
     serving_kwargs: dict[str, Any],
     request_kwargs: dict[str, Any],
     renders: int,
     reason: str,
 ) -> None:
-    request_id, logged_count, logged_reason = decline(serving_kwargs, request_kwargs, renders)
-
+    serving = make_serving(**serving_kwargs)
+    request = make_request(**request_kwargs)
+    assert asyncio.run(create_completion_batch_dispatch(serving, request)) == "original"
+    assert delegate == [request]
+    assert serving.beam_calls == []
+    assert serving.render_calls == renders
+    ((request_id, logged_count, logged_reason),) = _declines(logged)
     assert request_id == "request-0"
-    # The count is taken off the request, so it is the caller's list that the
-    # reason names -- not the rendered inputs, which may not exist yet.
-    assert logged_count == len(request_kwargs.get("prompt", ["a", "b", "c", "d"]))
+    assert logged_count == len(request.prompt)
     assert reason in logged_reason
 
 
-def test_a_batch_that_fits_is_still_a_batch(
+def test_a_batch_renders_and_submits_once_at_capacity(
     make_serving: Callable[..., _BatchSelf],
     make_request: Callable[..., Any],
     delegate: list[Any],
     logged: Mock,
 ) -> None:
-    """The control for the declines above: the same shape with headroom."""
     serving = make_serving(max_num_batched_tokens=40)
-
-    assert asyncio.run(create_completion_batch_dispatch(serving, make_request())) == (
-        "response-for-4"
-    )
+    to_params = Mock(return_value={"max_tokens": 990})
+    request = make_request(to_beam_search_params=to_params)
+    assert _batch_size(serving, request) == 4
+    assert asyncio.run(create_completion_batch_dispatch(serving, request)) == ("response-for-4")
     assert delegate == []
-    assert len(serving.beam_calls) == 1
     assert _declines(logged) == []
-
-
-# --------------------------------------------------------------------------- #
-# One session: one render, one submit, one response
-# --------------------------------------------------------------------------- #
-
-
-def test_a_batch_renders_once_and_submits_once(
-    serving: _BatchSelf, make_request: Callable[..., Any], logged: Mock
-) -> None:
-    """Four prompts are one render, one session, and one response."""
-    assert asyncio.run(create_completion_batch_dispatch(serving, make_request())) == (
-        "response-for-4"
-    )
     assert serving.render_calls == 1
     assert [call["prompt"] for call in serving.beam_calls] == [[0, 1, 2, 3]]
-    assert serving.logged == [
-        "cmpl-request-0-0",
-        "cmpl-request-0-1",
-        "cmpl-request-0-2",
-        "cmpl-request-0-3",
-    ]
-    assert [res.prompt for res in serving.response_calls[0]] == [
-        "text-0",
-        "text-1",
-        "text-2",
-        "text-3",
-    ]
+    to_params.assert_called_once_with(990, serving.default_sampling_params)
+    assert serving.beam_calls[0]["params"] == {"max_tokens": 990}
+    assert serving.logged == [f"cmpl-request-0-{i}" for i in range(4)]
+    assert len(serving.response_calls) == 1
+    assert [res.prompt for res in serving.response_calls[0]] == [f"text-{i}" for i in range(4)]
     assert logged.call_args.args == (
         "Beam batch session request_id=%s prompts=%d",
         "cmpl-request-0",
@@ -385,13 +310,15 @@ def test_a_batch_renders_once_and_submits_once(
     )
 
 
-@pytest.mark.parametrize("count", [2, 3, 7, 8])  # type: ignore[misc]
-def test_explicit_batch_policy_selects_fixed_http_sizes(
+@pytest.mark.parametrize("sizes", [None, [1, 3, 7]], ids=["default", "custom"])  # type: ignore[misc]
+@pytest.mark.parametrize("count", [2, 3, 4, 7, 8])  # type: ignore[misc]
+def test_batch_policy_selects_fixed_http_sizes(
     make_serving: Callable[..., _BatchSelf],
     make_request: Callable[..., Any],
     delegate: list[Any],
     monkeypatch: pytest.MonkeyPatch,
     count: int,
+    sizes: list[int] | None,
 ) -> None:
     from vllm_gr.config import GRConfig
 
@@ -401,37 +328,20 @@ def test_explicit_batch_policy_selects_fixed_http_sizes(
     )
     serving.engine_client.vllm_config.additional_config = {
         "vllm_gr_beam_execution_mode": "v1",
-        "vllm_gr_beam_online_batch_sizes": [1, 3, 7],
     }
+    if sizes is not None:
+        serving.engine_client.vllm_config.additional_config["vllm_gr_beam_online_batch_sizes"] = (
+            sizes
+        )
     request = make_request(prompt=["a"] * count)
     result = asyncio.run(create_completion_batch_dispatch(serving, request))
-    if count in (3, 7):
+    if count in (sizes if sizes is not None else [1, 2, 4]):
         assert result == f"response-for-{count}"
         assert [call["prompt"] for call in serving.beam_calls] == [list(range(count))]
         assert not delegate
     else:
         assert result == "original" and delegate == [request]
         assert not serving.beam_calls and serving.render_calls == 0
-
-
-def test_the_batch_runs_the_shared_per_prompt_budget(
-    make_serving: Callable[..., _BatchSelf], make_request: Callable[..., Any]
-) -> None:
-    """One session runs one budget, so the batch carries the agreed one."""
-    serving = make_serving()
-    seen: list[int] = []
-
-    def to_beam_search_params(tokens: int, _defaults: Any) -> dict[str, Any]:
-        seen.append(tokens)
-        return {"max_tokens": tokens}
-
-    asyncio.run(
-        create_completion_batch_dispatch(
-            serving, make_request(to_beam_search_params=to_beam_search_params)
-        )
-    )
-
-    assert seen == [990]
 
 
 def test_different_lengths_can_share_the_real_generation_budget(
@@ -449,11 +359,6 @@ def test_different_lengths_can_share_the_real_generation_budget(
 
     assert len(serving.beam_calls) == 1
     assert serving.beam_calls[0]["params"]["max_tokens"] == 5
-
-
-# --------------------------------------------------------------------------- #
-# Server faults and cancellation
-# --------------------------------------------------------------------------- #
 
 
 def test_a_render_that_disagrees_with_the_count_is_a_server_fault(
@@ -507,11 +412,6 @@ def test_a_cancelled_client_is_answered_rather_than_raised(
 
     assert result == "error-response"
     assert serving.error[0] == "Client disconnected"
-
-
-# --------------------------------------------------------------------------- #
-# The real response converter and the patch itself
-# --------------------------------------------------------------------------- #
 
 
 def test_real_response_conversion_preserves_indices_and_usage(
@@ -595,15 +495,11 @@ def restore_route() -> Any:
         patch_module._original_create_completion = original
 
 
-def test_the_patch_installs_and_verifies(restore_route: Any) -> None:  # noqa: ARG001
+def test_the_patch_installs_verifies_and_is_idempotent(restore_route: Any) -> None:  # noqa: ARG001
     patch_completion_batch()
 
     assert OpenAIServingCompletion._create_completion is create_completion_batch_dispatch
     assert patch_module._validate_completion_batch_patch() is None
-
-
-def test_the_patch_is_idempotent(restore_route: Any) -> None:  # noqa: ARG001
-    patch_completion_batch()
     original = patch_module._original_create_completion
     assert callable(original)
     patch_completion_batch()
