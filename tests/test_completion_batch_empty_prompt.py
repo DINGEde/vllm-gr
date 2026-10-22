@@ -130,7 +130,7 @@ def test_a_zero_token_render_is_only_schedulable_with_the_begin_token(
     if lengths[0] > 0:
         pytest.skip("this tokenizer renders the empty prompt as a token")
 
-    plan_options = dict(supported_sizes=(1, 2, 4), max_num_seqs=2, token_budget=2048)
+    plan_options = dict(configured_sizes=(1, 2, 4), max_num_seqs=2, token_budget=2048)
     with pytest.raises(ValueError, match="Prompt 0 Prefill length 0"):
         plan_completion_batches(lengths, [2, 2], **plan_options)
 
@@ -138,4 +138,4 @@ def test_a_zero_token_render_is_only_schedulable_with_the_begin_token(
     # to the prompt, so the same render becomes one prompt token.
     assert plan_completion_batches(
         [length + 1 for length in lengths], [2, 2], reserved_tokens=1, **plan_options
-    ) == (CompletionBatch(0, 2, 2),)
+    ).batches == (CompletionBatch(0, 2, 2),)

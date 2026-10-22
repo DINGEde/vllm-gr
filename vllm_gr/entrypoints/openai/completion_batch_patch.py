@@ -21,6 +21,7 @@ identical either way.
 from __future__ import annotations
 
 import asyncio
+import os
 import time
 from contextlib import aclosing
 from http import HTTPStatus
@@ -37,12 +38,12 @@ from vllm.renderers.inputs.preprocess import prompt_to_seq
 from vllm_gr.config import BeamExecutionMode, GRConfig
 from vllm_gr.entrypoints.beam_search_v1.exceptions import BeamSearchAdmissionError
 from vllm_gr.entrypoints.openai.completion_batch_plan import (
+    DECODE_ROWS_CAPACITY,
+    MAX_NUM_SEQS_CAPACITY,
     CompletionBatchPlan,
-    completion_batch_plan_reasons,
     plan_completion_batches,
 )
 from vllm_gr.logger import init_logger
-from vllm_gr.v1.beam.batch_contracts import select_supported_batch_sizes
 
 if TYPE_CHECKING:
     from fastapi import Request
@@ -52,6 +53,21 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 _COMPLETION_BATCH_PATCH_MARKER = "_vllm_gr_completion_batch_patch"
+
+# Emergency stop for the split-and-merge path. Setting the variable makes every
+# request delegate to the original handler from the next request on, without a
+# restart and without a configuration reload. Configuring
+# ``beam.online_batch_sizes: [1]`` is not the same thing: that leaves every
+# request on this path, rendered here and split here, running one prompt at a
+# time. Only an absent or falsy value keeps the path armed.
+_DISABLE_SPLIT_ENV = "VLLM_GR_DISABLE_ONLINE_BATCH_SPLIT"
+_TRUTHY = frozenset({"1", "true", "yes", "on"})
+
+
+def split_is_disabled() -> bool:
+    """Whether the operator has taken the split path out of service."""
+    return os.environ.get(_DISABLE_SPLIT_ENV, "").strip().lower() in _TRUTHY
+
 
 # An all-singleton plan that configuration and capacity did not force is
 # usually a budget-shape surprise. Five minutes between warnings keeps a
@@ -76,6 +92,11 @@ def _batch_size(serving, request: CompletionRequest) -> int | None:
     need nothing but the request, so they run before the renderer, which is the
     expensive step this patch exists to do once instead of once per prompt.
     """
+    # Read per request, not once at import: an operator reaching for the switch
+    # during an incident gets it applied to the next request, not the next
+    # restart.
+    if split_is_disabled():
+        return None
     if not request.use_beam_search or request.stream:
         return None
     # Bytes prompts carry their own embeddings and are rejected deeper in as
@@ -89,7 +110,10 @@ def _batch_size(serving, request: CompletionRequest) -> int | None:
         return None
     try:
         count = len(prompt_to_seq(request.prompt))
-    except (AttributeError, TypeError):
+    except (AttributeError, TypeError, ValueError):
+        # A prompt this helper cannot count is not evidence of a batch: the
+        # upstream body renders it and reports the caller error it deserves,
+        # rather than this frontend answering a malformed prompt as a defect.
         return None
     if count <= 1:
         return None
@@ -184,7 +208,11 @@ def _completion_batch_plan(
     scheduled_limit = getattr(scheduler, "max_num_scheduled_tokens", None)
     if scheduled_limit is not None:
         token_budget = min(token_budget, scheduled_limit)
-    max_num_seqs = getattr(scheduler, "max_num_seqs", max(sizes))
+    # ``max_num_seqs`` is part of every SchedulerConfig; a scheduler without one
+    # has granted no room to batch against, so fall back to the only size that
+    # is always legal rather than to the widest size the configuration asks for.
+    max_num_seqs = getattr(scheduler, "max_num_seqs", 1)
+    capacity_source = MAX_NUM_SEQS_CAPACITY
     decode_capacity = _decode_batch_capacity(serving, request)
     if decode_capacity is not None and any(
         _needs_decode_stage(request, budget) for budget in budgets
@@ -192,35 +220,23 @@ def _completion_batch_plan(
         # One logical batch occupies B*W native Decode rows on NPU. Cap each
         # session instead of declining the whole list, so the planner can still
         # split it into legal sub-batches.
+        if decode_capacity < max_num_seqs:
+            capacity_source = DECODE_ROWS_CAPACITY
         max_num_seqs = max(1, min(max_num_seqs, decode_capacity))
-    configured_sizes = tuple(sorted({size for size in sizes if size > 0}, reverse=True))
     reserved_tokens = _output_boundary_tokens(request)
     try:
-        usable_sizes = select_supported_batch_sizes(sizes, max_num_seqs=max_num_seqs)
-        batches = plan_completion_batches(
+        return plan_completion_batches(
             lengths,
             budgets,
-            supported_sizes=sizes,
+            configured_sizes=sizes,
             max_num_seqs=max_num_seqs,
             token_budget=token_budget,
             reserved_tokens=reserved_tokens,
             max_decode_steps=gr_config.beam_max_decode_steps,
+            capacity_source=capacity_source,
         )
     except ValueError as exc:
         raise VLLMValidationError(str(exc)) from exc
-    return CompletionBatchPlan(
-        batches=batches,
-        configured_sizes=configured_sizes,
-        usable_sizes=usable_sizes,
-        reasons=completion_batch_plan_reasons(
-            batches,
-            lengths,
-            [budget - reserved_tokens for budget in budgets],
-            configured_sizes=configured_sizes,
-            usable_sizes=usable_sizes,
-            token_budget=token_budget,
-        ),
-    )
 
 
 def _warn_if_unexpected_singletons(
@@ -273,7 +289,9 @@ def _admission_rejection_response(
     return serving.create_error_response(
         f"Beam sub-batch {batch_index} of {plan_size} was rejected by engine "
         f"admission after {batch_index} completed sub-batches; the request was "
-        f"not retried: {message}",
+        f"not retried. Retrying it recomputes all {plan_size} sub-batches, "
+        f"including the {batch_index} whose output is dropped with this "
+        f"response: {message}",
         err_type="ServiceUnavailableError",
         status_code=HTTPStatus.SERVICE_UNAVAILABLE,
     )
@@ -298,14 +316,20 @@ async def _create_completion_batched(
     ]
     request_id = f"cmpl-{self._base_request_id(raw_request, request.request_id)}"
     logger.info(
-        "Beam batch plan request_id=%s prompts=%d sub_batches=%d sizes=%s "
-        "configured_sizes=%s usable_sizes=%s reasons=%s",
+        "Beam batch plan request_id=%s prompts=%d sub_batches=%d batches=%s "
+        "configured_sizes=%s usable_sizes=%s capacity_source=%s reasons=%s",
         request_id,
         len(engine_inputs),
         len(plan.batches),
-        [batch.stop - batch.start for batch in plan.batches],
+        # Per batch, not just per plan: the plan-level reasons name the limits
+        # in play, this names which one stopped each boundary.
+        [
+            (batch.start, batch.stop, batch.stop - batch.start, batch.boundary_reason)
+            for batch in plan.batches
+        ],
         plan.configured_sizes,
         plan.usable_sizes,
+        plan.capacity_source,
         plan.reasons,
     )
     _warn_if_unexpected_singletons(plan, request_id, len(engine_inputs))

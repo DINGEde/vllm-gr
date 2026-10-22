@@ -20,12 +20,12 @@ def _plan(
     plan = plan_completion_batches(
         lengths,
         budgets,
-        supported_sizes=(1, 2, 4),
+        configured_sizes=(1, 2, 4),
         max_num_seqs=seqs,
         token_budget=tokens,
         reserved_tokens=reserved,
     )
-    return [(batch.start, batch.stop, batch.max_tokens) for batch in plan]
+    return [(batch.start, batch.stop, batch.max_tokens) for batch in plan.batches]
 
 
 @pytest.mark.parametrize(  # type: ignore[misc]
@@ -167,7 +167,7 @@ def test_a_last_input_over_the_configured_cap_rejects_the_whole_list() -> None:
         plan_completion_batches(
             [10, 10, 10],
             [1, 1, 3],
-            supported_sizes=(1, 2),
+            configured_sizes=(1, 2),
             max_num_seqs=2,
             token_budget=40,
             max_decode_steps=2,
@@ -177,12 +177,12 @@ def test_a_last_input_over_the_configured_cap_rejects_the_whole_list() -> None:
     plan = plan_completion_batches(
         [10, 10, 10],
         [1, 1, 2],
-        supported_sizes=(1, 2),
+        configured_sizes=(1, 2),
         max_num_seqs=2,
         token_budget=40,
         max_decode_steps=2,
     )
-    assert [(batch.start, batch.stop, batch.max_tokens) for batch in plan] == [
+    assert [(batch.start, batch.stop, batch.max_tokens) for batch in plan.batches] == [
         (0, 2, 1),
         (2, 3, 2),
     ]
@@ -192,11 +192,11 @@ def test_custom_sizes_respect_generation_budget_boundaries() -> None:
     plan = plan_completion_batches(
         [10] * 8,
         [3] * 3 + [2] * 5,
-        supported_sizes=(1, 3, 7),
+        configured_sizes=(1, 3, 7),
         max_num_seqs=8,
         token_budget=100,
     )
-    assert [(b.start, b.stop, b.max_tokens) for b in plan] == [
+    assert [(b.start, b.stop, b.max_tokens) for b in plan.batches] == [
         (0, 3, 3),
         (3, 6, 2),
         (6, 7, 2),
@@ -211,3 +211,140 @@ def test_a_broken_progress_invariant_fails_instead_of_looping(
     monkeypatch.setattr(plan_module, "sum", lambda _: 41, raising=False)
     with pytest.raises(RuntimeError, match="made no progress at prompt 0"):
         _plan([10], [3])
+
+
+# --------------------------------------------------------------------------- #
+# Per batch: name the limit that stopped this boundary, not the limits in play
+# --------------------------------------------------------------------------- #
+
+
+def test_every_batch_names_the_limit_that_stopped_its_boundary() -> None:
+    # A pair costs 20 tokens and a quartet 40, over a 25-token budget: the two
+    # pairs were refused a wider batch by the budget, the last pair is the end
+    # of the list and nothing larger was ever a candidate.
+    plan = plan_completion_batches(
+        [10] * 6,
+        [3] * 6,
+        configured_sizes=(1, 2, 4),
+        max_num_seqs=4,
+        token_budget=25,
+    )
+
+    assert [(b.start, b.stop, b.boundary_reason) for b in plan.batches] == [
+        (0, 2, "token_budget"),
+        (2, 4, "token_budget"),
+        (4, 6, None),
+    ]
+    assert plan.reasons == ("token_budget",)
+
+
+def test_a_batch_split_by_its_neighbour_names_the_budget_shape() -> None:
+    plan = plan_completion_batches(
+        [10] * 4,
+        [3, 3, 2, 2],
+        configured_sizes=(1, 2, 4),
+        max_num_seqs=4,
+        token_budget=40,
+    )
+
+    # The second batch is on the boundary, not over a budget: the plan as a
+    # whole is narrow because two prompts disagree, and only the first batch
+    # can say so.
+    assert [(b.start, b.stop, b.boundary_reason) for b in plan.batches] == [
+        (0, 2, "unequal_effective_budgets"),
+        (2, 4, None),
+    ]
+    assert plan.reasons == ("unequal_effective_budgets",)
+
+
+# --------------------------------------------------------------------------- #
+# Capacity: which cap, and only when it actually held the plan back
+# --------------------------------------------------------------------------- #
+
+
+def test_capacity_below_the_configured_width_is_labelled_by_its_source() -> None:
+    plan = plan_completion_batches(
+        [10] * 8,
+        [3] * 8,
+        configured_sizes=(1, 2, 4, 8),
+        max_num_seqs=4,
+        token_budget=100,
+        capacity_source="max_num_seqs",
+    )
+
+    assert [b.stop - b.start for b in plan.batches] == [4, 4]
+    assert plan.configured_sizes == (8, 4, 2, 1)
+    assert plan.usable_sizes == (4, 2, 1)
+    assert plan.capacity_source == "max_num_seqs"
+    # Every batch reached the usable width, so nothing degraded and no reason
+    # may claim otherwise.
+    assert plan.reasons == ()
+    assert (plan.capacity_source == "decode_rows") is False
+
+
+def test_the_decode_row_cap_keeps_its_own_label() -> None:
+    """The two caps are told apart: an NPU row limit is not ``max_num_seqs``."""
+    plan = plan_completion_batches(
+        [10] * 4,
+        [3] * 4,
+        configured_sizes=(1, 2, 4, 8),
+        max_num_seqs=4,
+        token_budget=100,
+        capacity_source="decode_rows",
+    )
+
+    assert plan.usable_sizes == (4, 2, 1)
+    assert plan.capacity_source == "decode_rows"
+    assert plan.reasons == ()
+
+
+def test_a_deployment_that_runs_the_configured_width_reports_no_cap() -> None:
+    plan = plan_completion_batches(
+        [10] * 4,
+        [3] * 4,
+        configured_sizes=(1, 2, 4),
+        max_num_seqs=8,
+        token_budget=100,
+        capacity_source="max_num_seqs",
+    )
+
+    assert plan.usable_sizes == (4, 2, 1)
+    # The label names a cap nobody hit, so it is dropped rather than reported.
+    assert plan.capacity_source is None
+
+
+def test_a_singleton_configuration_is_named_where_capacity_is_not() -> None:
+    plan = plan_completion_batches(
+        [10] * 4,
+        [3] * 4,
+        configured_sizes=(1,),
+        max_num_seqs=8,
+        token_budget=100,
+        capacity_source="max_num_seqs",
+    )
+
+    assert plan.usable_sizes == (1,)
+    assert plan.capacity_source is None
+    assert plan.reasons == ("configured_singletons",)
+    assert plan.singletons_are_intentional
+
+
+# --------------------------------------------------------------------------- #
+# The Prefill budget is the scheduler's, and no chunked path can beat it
+# --------------------------------------------------------------------------- #
+
+
+def test_the_prefill_budget_is_the_scheduling_budget_of_the_replaced_path() -> None:
+    """A prompt over the budget is refused here, not scheduled in pieces.
+
+    Beam search cannot chunk a Prefill: the V1 runtime rejects
+    ``enable_chunked_prefill`` at startup and every input is measured against
+    the same ``max_num_batched_tokens`` the non-batched renderer already
+    applies to the list total. The planner refusing one prompt over that
+    budget is therefore the same limit, decided before any sub-batch runs.
+    """
+    with pytest.raises(ValueError, match="Prompt 0 Prefill length 20480"):
+        _plan([20480, 10], [3, 3], tokens=8192)
+
+    # The same input at the budget the scheduler was built with plans normally.
+    assert _plan([20480, 10], [3, 3], tokens=32768, seqs=2) == [(0, 2, 3)]

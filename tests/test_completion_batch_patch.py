@@ -7,6 +7,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Callable
 from http import HTTPStatus
+from itertools import accumulate
 from types import MethodType, SimpleNamespace
 from typing import Any
 from unittest.mock import Mock
@@ -248,6 +249,77 @@ def test_a_legacy_engine_is_left_alone(
         assert _batch_size(serving, make_request()) is None
 
 
+def test_the_emergency_switch_returns_the_request_to_the_original_handler(
+    serving: _BatchSelf,
+    make_request: Callable[..., Any],
+    delegate: list[Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A rollback an operator can perform without shipping code.
+
+    Configuring one supported size is not this switch: it keeps the request on
+    this path, rendered and partitioned here. Setting the variable delegates,
+    which is the behaviour the engine had before the patch.
+    """
+    monkeypatch.setenv("VLLM_GR_DISABLE_ONLINE_BATCH_SPLIT", "1")
+    request = make_request()
+
+    assert asyncio.run(create_completion_batch_dispatch(serving, request)) == "original"
+
+    assert delegate == [request]
+    assert serving.render_calls == 0
+    assert serving.beam_calls == []
+
+
+def test_the_switch_is_read_on_every_request(
+    serving: _BatchSelf, make_request: Callable[..., Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """It has to work during the incident it exists for, not after a restart."""
+    request = make_request()
+    assert _batch_size(serving, request) == 4
+
+    monkeypatch.setenv("VLLM_GR_DISABLE_ONLINE_BATCH_SPLIT", "true")
+    assert _batch_size(serving, request) is None
+
+    monkeypatch.setenv("VLLM_GR_DISABLE_ONLINE_BATCH_SPLIT", "")
+    assert _batch_size(serving, request) == 4
+
+
+@pytest.mark.parametrize("value", ["0", "false", "no", "off", "  "])  # type: ignore[misc]
+def test_only_a_truthy_value_disarms_the_switch(
+    serving: _BatchSelf,
+    make_request: Callable[..., Any],
+    monkeypatch: pytest.MonkeyPatch,
+    value: str,
+) -> None:
+    monkeypatch.setenv("VLLM_GR_DISABLE_ONLINE_BATCH_SPLIT", value)
+    assert _batch_size(serving, make_request()) == 4
+
+
+def test_a_prompt_the_counter_cannot_read_is_left_to_the_original_handler(
+    serving: _BatchSelf,
+    make_request: Callable[..., Any],
+    delegate: list[Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Counting is this route's convenience, not the caller's contract.
+
+    A prompt shape the counter rejects is the upstream renderer's to report, so
+    it delegates and the caller keeps the error upstream would have given.
+    """
+
+    def unreadable(_prompt: Any) -> Any:
+        raise ValueError("prompt must be a string, a list of strings, or token ids")
+
+    monkeypatch.setattr(patch_module, "prompt_to_seq", unreadable)
+    request = make_request()
+
+    assert asyncio.run(create_completion_batch_dispatch(serving, request)) == "original"
+
+    assert delegate == [request]
+    assert serving.render_calls == 0
+
+
 # --------------------------------------------------------------------------- #
 # Delegation: the original handler runs, and the render is not repeated
 # --------------------------------------------------------------------------- #
@@ -301,14 +373,15 @@ def test_a_batch_renders_once_and_submits_once(
     assert len(serving.response_calls) == 1
     assert [res.prompt for res in serving.response_calls[0]] == [f"text-{i}" for i in range(4)]
     assert logged.call_args.args == (
-        "Beam batch plan request_id=%s prompts=%d sub_batches=%d sizes=%s "
-        "configured_sizes=%s usable_sizes=%s reasons=%s",
+        "Beam batch plan request_id=%s prompts=%d sub_batches=%d batches=%s "
+        "configured_sizes=%s usable_sizes=%s capacity_source=%s reasons=%s",
         "cmpl-request-0",
         4,
         1,
-        [4],
+        [(0, 4, 4, None)],
         (4, 2, 1),
         (4, 2, 1),
+        None,
         (),
     )
 
@@ -398,8 +471,19 @@ def test_an_arbitrary_prompt_list_is_split_into_contiguous_batches(
     assert [i for call in serving.beam_calls for i in call["prompt"]] == list(range(count))
     assert serving.render_calls == 1
     assert len(serving.response_calls) == 1
-    # prompts, sub_batches, sizes, configured_sizes, usable_sizes, reasons
-    assert logged.call_args.args[3:] == (len(sizes), sizes, (4, 2, 1), (4, 2, 1), ())
+    # prompts, sub_batches, batches, configured_sizes, usable_sizes,
+    # capacity_source, reasons
+    assert logged.call_args.args[3:] == (
+        len(sizes),
+        [
+            (start, start + size, size, None)
+            for start, size in zip(list(accumulate([0] + sizes))[:-1], sizes, strict=True)
+        ],
+        (4, 2, 1),
+        (4, 2, 1),
+        None,
+        (),
+    )
 
 
 @pytest.mark.parametrize(  # type: ignore[misc]
@@ -654,16 +738,69 @@ def test_plan_reasons_name_the_static_limit(
     assert logged.call_args.args[5:] == (
         (4, 2, 1),
         (4, 2, 1),
+        None,
         ("unequal_effective_budgets",),
     )
 
 
-def test_sequence_capacity_is_recorded_without_a_warning(
+def test_the_plan_log_names_why_each_boundary_stopped(
     make_serving: Callable[..., _BatchSelf],
     make_request: Callable[..., Any],
     logged: Mock,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """The plan-level reasons say which limits are in play; a reader asking why
+    the fifth batch holds one prompt gets the answer for that batch."""
+    serving = make_serving(engine_inputs=[0, 1, 2], prompt_lengths={0: 10, 1: 20, 2: 30})
+    monkeypatch.setattr(
+        patch_module,
+        "get_max_tokens",
+        lambda _len, _max, input_length, _default, _override, **_: {
+            10: 3,
+            20: 2,
+            30: 1,
+        }[input_length],
+    )
+
+    asyncio.run(create_completion_batch_dispatch(serving, make_request(prompt=["a", "b", "c"])))
+
+    assert logged.call_args.args[4] == [
+        (0, 1, 1, "unequal_effective_budgets"),
+        (1, 2, 1, "unequal_effective_budgets"),
+        (2, 3, 1, None),
+    ]
+
+
+def test_a_scheduler_without_a_sequence_cap_runs_singletons(
+    make_serving: Callable[..., _BatchSelf],
+    make_request: Callable[..., Any],
+    logged: Mock,
+) -> None:
+    """The cap is a required scheduler field, so its absence is not room to batch.
+
+    There is only one size this frontend may assume when the engine reports no
+    sequence capacity: the one that asks for none.
+    """
+    serving = make_serving()
+    del serving.engine_client.vllm_config.scheduler_config.max_num_seqs
+
+    asyncio.run(create_completion_batch_dispatch(serving, make_request()))
+
+    assert [len(call["prompt"]) for call in serving.beam_calls] == [1, 1, 1, 1]
+    configured, usable, capacity_source, reasons = logged.call_args.args[5:]
+    assert configured == (4, 2, 1)
+    assert usable == (1,)
+    assert capacity_source == "max_num_seqs"
+    assert reasons == ()
+
+
+def test_a_capacity_below_the_configuration_is_named_as_the_capacity(
+    make_serving: Callable[..., _BatchSelf],
+    make_request: Callable[..., Any],
+    logged: Mock,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The cap is reported by name, and it is not reported as a degradation."""
     warning = Mock()
     monkeypatch.setattr(patch_module.logger, "warning", warning)
     serving = make_serving(max_num_seqs=2)
@@ -671,7 +808,11 @@ def test_sequence_capacity_is_recorded_without_a_warning(
     asyncio.run(create_completion_batch_dispatch(serving, make_request()))
 
     assert [len(call["prompt"]) for call in serving.beam_calls] == [2, 2]
-    assert logged.call_args.args[5:] == ((4, 2, 1), (2, 1), ("sequence_capacity",))
+    configured, usable, capacity_source, reasons = logged.call_args.args[5:]
+    assert (configured, usable) == ((4, 2, 1), (2, 1))
+    assert capacity_source == "max_num_seqs"
+    # Every batch ran at the width the deployment can run: no reason to give.
+    assert reasons == ()
     assert warning.call_count == 0
 
 
@@ -704,7 +845,12 @@ def test_configured_singletons_never_warn(
     asyncio.run(create_completion_batch_dispatch(serving, make_request()))
 
     assert [len(call["prompt"]) for call in serving.beam_calls] == [1, 1, 1, 1]
-    assert logged.call_args.args[5:] == ((1,), (1,), ("configured_singletons",))
+    assert logged.call_args.args[5:] == (
+        (1,),
+        (1,),
+        None,
+        ("configured_singletons",),
+    )
     assert warning.call_count == 0
 
 
@@ -1136,6 +1282,7 @@ def test_a_cancelled_client_is_answered_rather_than_raised(
         batches=(CompletionBatch(start=0, stop=1, max_tokens=3),),
         configured_sizes=(1,),
         usable_sizes=(1,),
+        capacity_source=None,
         reasons=("configured_singletons",),
     )
     result = asyncio.run(_create_completion_batched(serving, request, None, [0], plan))

@@ -52,15 +52,24 @@ inputs become `3 + 3 + 1`, not `4 + 3`. Output order, serial cleanup and
 cancellation semantics are unchanged. Direct offline/engine batch calls are not
 repartitioned by this policy.
 
-Every plan logs the executed `sizes` together with `configured_sizes`,
-`usable_sizes` and `reasons`. `usable_sizes` is what capacity leaves after
-`max_num_seqs` and the NPU Decode row cap; `reasons` names the static limits
-that kept the plan narrow: `unequal_effective_budgets`, `sequence_capacity`,
-`configured_singletons` and `token_budget`. A list that ends up all singletons
-logs the same fields. When configuration and capacity would have allowed a
-larger batch, an all-singleton plan also emits one WARNING at most every five
-minutes, carrying the number of suppressed warnings since the last one. A
-configured policy of `[1]` or a capacity of one never warns.
+Every plan logs one line: `batches` lists each sub-batch as
+`(start, stop, size, boundary_reason)`, so the reason a given sub-batch is a
+singleton is readable without inferring it from the list as a whole.
+`usable_sizes` is what capacity leaves after `max_num_seqs` and the NPU Decode
+row cap, and `capacity_source` names which of the two did the cutting
+(`max_num_seqs` or `decode_rows`) when the usable width is below the configured
+width; it is `None` when the deployment runs the configured width.
+`boundary_reason` and `reasons` use one vocabulary:
+`unequal_effective_budgets`, `token_budget` and `configured_singletons`. They
+name limits that held the plan below `usable_sizes`; a deployment capacity below
+the configured width is reported by `capacity_source`, not as a reason, because
+a plan whose batches all reach `usable_sizes` has lost no width. A list that
+ends up all singletons logs the same fields. When configuration and capacity
+would have allowed a larger batch, an all-singleton plan also emits one WARNING
+at most every five minutes, carrying the number of suppressed warnings since the
+last one; the interval and the counter are per process, so a deployment with N
+workers warns up to N times per interval. A configured policy of `[1]` or a
+capacity of one never warns.
 
 ## Failure Reporting
 
@@ -74,10 +83,26 @@ so no prompt is computed without a place for its answer.
 
 Device and KV admission remain the engine's decision. If the engine refuses a
 sub-batch this adapter assembled, the request is answered with HTTP 503
-`ServiceUnavailableError` naming the rejected sub-batch. Earlier sub-batches are
-not returned as partial output, and no sub-batch is retried: choosing the
-grouping was the server's decision, so a refused group is not reported as an
-invalid caller request.
+`ServiceUnavailableError` naming the rejected sub-batch and how many sub-batches
+had already completed. Earlier sub-batches are not returned as partial output,
+and no sub-batch is retried: choosing the grouping was the server's decision, so
+a refused group is not reported as an invalid caller request. The refusal is
+therefore asymmetric in cost: a k-input list refused at sub-batch j has already
+computed j sub-batches whose output is dropped, and retrying recomputes all of
+them. A caller that retries automatically should back off as it would for any
+503.
+
+## Rollback
+
+Set `VLLM_GR_DISABLE_ONLINE_BATCH_SPLIT` to `1`, `true`, `yes` or `on` to take
+the split path out of service without a code change or a restart: the variable
+is read on every request, and requests then take the upstream handler exactly as
+before the feature. Any other value, including an empty one, leaves the path
+armed. Reverting the code remains the only way to remove the patch itself.
+
+Configuring `online_batch_sizes: [1]` is not a rollback. It keeps every request
+on this path -- rendered once here, partitioned here, identifiers assigned here
+-- and only makes each sub-batch hold one input.
 
 ## Performance Boundary
 
@@ -90,4 +115,12 @@ guarantee graph replay for every shape. See [capture configuration](prefill_grap
 Verify actual execution mode,
 warmup cost, memory use and end-to-end latency before selecting a deployment
 policy. Largest-first packing is not a throughput-optimal search. Changing the
-policy can change numerical outputs because the execution shape changes.
+policy can change numerical outputs because the execution shape changes: a
+4-input batch and four 1-input batches have been measured to disagree on the
+top-ranked candidate for a fraction of inputs, so a policy that batches by
+default returns answers that a per-input `[1]` deployment does not.
+
+A k-input request runs its sub-batches serially, but it does not hold the engine
+between them: requests from other clients are admitted in the gaps. A k-input
+request's end-to-end latency therefore includes whatever else the engine ran,
+and its tail latency is not the sum of its own sub-batch latencies alone.
