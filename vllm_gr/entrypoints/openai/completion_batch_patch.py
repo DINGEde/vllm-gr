@@ -35,11 +35,14 @@ from vllm.exceptions import VLLMValidationError
 from vllm.renderers.inputs.preprocess import prompt_to_seq
 
 from vllm_gr.config import BeamExecutionMode, GRConfig
+from vllm_gr.entrypoints.beam_search_v1.exceptions import BeamSearchAdmissionError
 from vllm_gr.entrypoints.openai.completion_batch_plan import (
-    CompletionBatch,
+    CompletionBatchPlan,
+    completion_batch_plan_reasons,
     plan_completion_batches,
 )
 from vllm_gr.logger import init_logger
+from vllm_gr.v1.beam.batch_contracts import select_supported_batch_sizes
 
 if TYPE_CHECKING:
     from fastapi import Request
@@ -49,6 +52,14 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 _COMPLETION_BATCH_PATCH_MARKER = "_vllm_gr_completion_batch_patch"
+
+# An all-singleton plan that configuration and capacity did not force is
+# usually a budget-shape surprise. Five minutes between warnings keeps a
+# pathological list from writing one line per request while still making the
+# degradation visible; the suppressed count rides on the next warning.
+_SINGLETON_WARNING_INTERVAL_S = 300.0
+_singleton_warning_at: float | None = None
+_singleton_warnings_suppressed = 0
 
 # Filled in by ``patch_completion_batch``. Kept module-level so the wrapper has
 # exactly one referent: the function object the route resolved when it was
@@ -121,9 +132,8 @@ def _output_boundary_tokens(request: CompletionRequest) -> int:
 def _needs_decode_stage(request: CompletionRequest, budget: int) -> bool:
     """Whether a budget leaves work after the Prefill forward.
 
-    The engine runs ``budget - boundary tokens - 1`` Decode steps and accepts
-    zero, so an adjusted budget of one is Prefill-only and never occupies a
-    Decode row.
+    The planner admits an effective budget of 1..3 Decode steps. An effective
+    budget of one is Prefill-only and never occupies a Decode row.
     """
     return budget - _output_boundary_tokens(request) > 1
 
@@ -141,13 +151,14 @@ def _decode_batch_capacity(serving, request: CompletionRequest) -> int | None:
 
 def _completion_batch_plan(
     serving, request: CompletionRequest, engine_inputs: list
-) -> tuple[CompletionBatch, ...]:
+) -> CompletionBatchPlan:
     """Resolve every budget and partition the list before any session runs.
 
     Budgets stay per input: a sub-batch carries the budget of the prompts it
     holds, so no prompt is silently shortened to match a neighbour. The plan is
-    complete before the first submission, so an input the engine would reject
-    cannot leave earlier prompts computed but unanswered.
+    complete before the first submission, so an input the planner can reject
+    statically cannot leave earlier prompts computed but unanswered. Device/KV
+    admission remains the engine's responsibility.
     """
     max_model_len = serving.model_config.max_model_len
     lengths = [
@@ -166,7 +177,8 @@ def _completion_batch_plan(
         for engine_input in engine_inputs
     ]
     vllm_config = serving.engine_client.vllm_config
-    sizes = GRConfig.from_vllm_config(vllm_config).beam_online_batch_sizes
+    gr_config = GRConfig.from_vllm_config(vllm_config)
+    sizes = gr_config.beam_online_batch_sizes
     scheduler = vllm_config.scheduler_config
     token_budget = scheduler.max_num_batched_tokens
     scheduled_limit = getattr(scheduler, "max_num_scheduled_tokens", None)
@@ -181,16 +193,90 @@ def _completion_batch_plan(
         # session instead of declining the whole list, so the planner can still
         # split it into legal sub-batches.
         max_num_seqs = max(1, min(max_num_seqs, decode_capacity))
+    configured_sizes = tuple(sorted({size for size in sizes if size > 0}, reverse=True))
+    reserved_tokens = _output_boundary_tokens(request)
     try:
-        return plan_completion_batches(
+        usable_sizes = select_supported_batch_sizes(sizes, max_num_seqs=max_num_seqs)
+        batches = plan_completion_batches(
             lengths,
             budgets,
             supported_sizes=sizes,
             max_num_seqs=max_num_seqs,
             token_budget=token_budget,
+            reserved_tokens=reserved_tokens,
+            max_decode_steps=gr_config.beam_max_decode_steps,
         )
     except ValueError as exc:
         raise VLLMValidationError(str(exc)) from exc
+    return CompletionBatchPlan(
+        batches=batches,
+        configured_sizes=configured_sizes,
+        usable_sizes=usable_sizes,
+        reasons=completion_batch_plan_reasons(
+            batches,
+            lengths,
+            [budget - reserved_tokens for budget in budgets],
+            configured_sizes=configured_sizes,
+            usable_sizes=usable_sizes,
+            token_budget=token_budget,
+        ),
+    )
+
+
+def _warn_if_unexpected_singletons(
+    plan: CompletionBatchPlan,
+    request_id: str,
+    prompt_count: int,
+) -> None:
+    """Rate-limit the warning for singletons nothing in the configuration asked for."""
+    global _singleton_warning_at, _singleton_warnings_suppressed
+
+    if not plan.all_singletons or plan.singletons_are_intentional:
+        return
+    now = time.monotonic()
+    if (
+        _singleton_warning_at is not None
+        and now - _singleton_warning_at < _SINGLETON_WARNING_INTERVAL_S
+    ):
+        _singleton_warnings_suppressed += 1
+        return
+    logger.warning(
+        "Beam batch plan ran unbatched request_id=%s prompts=%d "
+        "configured_sizes=%s usable_sizes=%s reasons=%s suppressed_since_last=%d",
+        request_id,
+        prompt_count,
+        plan.configured_sizes,
+        plan.usable_sizes,
+        plan.reasons,
+        _singleton_warnings_suppressed,
+    )
+    _singleton_warning_at = now
+    _singleton_warnings_suppressed = 0
+
+
+def _admission_rejection_response(
+    serving,
+    message: str,
+    batch_index: int,
+    plan_size: int,
+) -> ErrorResponse:
+    """Report an admission rejection as a server-side, retryable failure.
+
+    The caller asked for k prompts and upstream would have run them as k
+    independent requests; the plan that grouped them is this frontend's
+    decision, so a group the engine refuses is not a caller mistake and must
+    not be answered as 400. Earlier sub-batches completed but their outputs are
+    not sent: retrying them would recompute work and ordering the caller never
+    asked for, and retrying only the refused group would still answer one HTTP
+    request from two different scheduling decisions.
+    """
+    return serving.create_error_response(
+        f"Beam sub-batch {batch_index} of {plan_size} was rejected by engine "
+        f"admission after {batch_index} completed sub-batches; the request was "
+        f"not retried: {message}",
+        err_type="ServiceUnavailableError",
+        status_code=HTTPStatus.SERVICE_UNAVAILABLE,
+    )
 
 
 async def _create_completion_batched(
@@ -198,7 +284,7 @@ async def _create_completion_batched(
     request: CompletionRequest,
     raw_request: Request | None,
     engine_inputs: list,
-    plan: tuple[CompletionBatch, ...],
+    plan: CompletionBatchPlan,
 ) -> object:
     """Run a complete plan serially, preserving one response per HTTP request.
 
@@ -208,16 +294,21 @@ async def _create_completion_batched(
     """
     batch_params = [
         request.to_beam_search_params(batch.max_tokens, self.default_sampling_params)
-        for batch in plan
+        for batch in plan.batches
     ]
     request_id = f"cmpl-{self._base_request_id(raw_request, request.request_id)}"
     logger.info(
-        "Beam batch plan request_id=%s prompts=%d sub_batches=%d sizes=%s",
+        "Beam batch plan request_id=%s prompts=%d sub_batches=%d sizes=%s "
+        "configured_sizes=%s usable_sizes=%s reasons=%s",
         request_id,
         len(engine_inputs),
-        len(plan),
-        [batch.stop - batch.start for batch in plan],
+        len(plan.batches),
+        [batch.stop - batch.start for batch in plan.batches],
+        plan.configured_sizes,
+        plan.usable_sizes,
+        plan.reasons,
     )
+    _warn_if_unexpected_singletons(plan, request_id, len(engine_inputs))
     created_time = int(time.time())
 
     request_metadata = RequestResponseMetadata(request_id=request_id)
@@ -231,7 +322,7 @@ async def _create_completion_batched(
     )
     final_res_batch: list[RequestOutput] = []
     try:
-        for batch_index, (batch, params) in enumerate(zip(plan, batch_params, strict=True)):
+        for batch_index, (batch, params) in enumerate(zip(plan.batches, batch_params, strict=True)):
             # Yield so a cancellation that arrived while the previous iterator
             # was closing is delivered before the next session is submitted.
             # The HTTP route's with_cancellation wrapper owns the disconnect
@@ -247,7 +338,7 @@ async def _create_completion_batched(
             # A one-session plan keeps the identifier the caller already sees;
             # a split list names each session so the engine's logs, the
             # frontend's, and any cancellation can be traced to one of them.
-            child_id = request_id if len(plan) == 1 else f"{request_id}-batch-{batch_index}"
+            child_id = request_id if len(plan.batches) == 1 else f"{request_id}-batch-{batch_index}"
             generator = self.beam_search(
                 prompt=engine_inputs[batch.start : batch.stop],
                 request_id=child_id,
@@ -255,8 +346,26 @@ async def _create_completion_batched(
                 lora_request=lora_request,
                 trace_headers=trace_headers,
             )
-            async with aclosing(generator):
-                results = [res async for res in generator]
+            try:
+                async with aclosing(generator):
+                    results = [res async for res in generator]
+            except BeamSearchAdmissionError as error:
+                # The V1 frontend submits the whole session before yielding,
+                # so a refusal arrives as this exception and no output carries
+                # it. Only the typed rejection is converted: any other
+                # VLLMValidationError is a caller mistake and must stay a 400.
+                return _admission_rejection_response(
+                    self, str(error), batch_index, len(plan.batches)
+                )
+            # The frontend above never yields an error output; reaching this
+            # means an unexpected one did, and it must not be counted as a
+            # completed prompt.
+            if any(
+                output.finish_reason == "error" for result in results for output in result.outputs
+            ):
+                return _internal_error_response(
+                    self, f"beam batch {batch_index} returned an error output"
+                )
             expected = batch.stop - batch.start
             if len(results) != expected:
                 return _internal_error_response(

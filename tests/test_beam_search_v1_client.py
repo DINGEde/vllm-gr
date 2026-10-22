@@ -22,7 +22,10 @@ from vllm_gr.entrypoints.beam_search_v1.client import (
     AsyncBeamSearchClient,
     BeamSearchClient,
 )
-from vllm_gr.entrypoints.beam_search_v1.exceptions import BeamSearchEngineError
+from vllm_gr.entrypoints.beam_search_v1.exceptions import (
+    BeamSearchAdmissionError,
+    BeamSearchEngineError,
+)
 from vllm_gr.entrypoints.beam_search_v1.protocol import (
     BeamSearchSession,
     OfflineBeamSearchRequest,
@@ -448,7 +451,8 @@ def test_admission_rejection_is_a_client_error_after_a_terminal_result(online: b
 
     The terminal payload has one shape, so the code is the whole difference
     between telling the caller what to change and reporting a server fault for
-    a session that never ran.
+    a session that never ran. The typed subclass keeps it a 400 by default
+    while letting a caller that chose the grouping report the refusal itself.
     """
     failure = BeamBatchFailure(ADMISSION_REJECTED_CODE, "beam_width must equal 128", None)
     result = BeamBatchResult(BEAM_BATCH_PROTOCOL_VERSION, "session-1", None, failure)
@@ -459,9 +463,10 @@ def test_admission_rejection_is_a_client_error_after_a_terminal_result(online: b
         client = BeamSearchClient(SimpleNamespace(llm_engine=object()))
         call = OfflineBeamSearchRequest([[1, 2]], object())
 
-    with pytest.raises(VLLMValidationError) as caught:
+    with pytest.raises(BeamSearchAdmissionError) as caught:
         client.build_output(call, _request(), result)
 
+    assert isinstance(caught.value, VLLMValidationError)
     assert str(caught.value) == "beam_width must equal 128"
 
 

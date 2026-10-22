@@ -28,6 +28,11 @@ from vllm_gr.v1.beam.batch_contracts import (
     BeamBatchParams,
     BeamBatchRequest,
     BeamOutputOptions,
+    effective_generation_budget_error,
+    effective_generation_tokens,
+    validate_batch_sequence_limit,
+    validate_prefill_token_budget,
+    validate_prompt_lengths,
 )
 
 
@@ -55,11 +60,10 @@ def _create_request_params(
     begin_token_id = _get_token_id(tokenizer, getattr(params, "begin_token", None), "begin_token")
     end_token_id = _get_token_id(tokenizer, getattr(params, "end_token", None), "end_token")
     reserved_tokens = int(begin_token_id is not None) + int(end_token_id is not None)
-    decode_steps = params.max_tokens - reserved_tokens
-    if decode_steps <= 0:
-        raise BeamSearchRequestError(
-            "max_tokens must leave at least one Decode step after begin/end tokens"
-        )
+    failure = effective_generation_budget_error(params.max_tokens, reserved_tokens)
+    if failure is not None:
+        raise BeamSearchRequestError(failure)
+    decode_steps = effective_generation_tokens(params.max_tokens, reserved_tokens)
 
     stop_token_id = end_token_id
     if stop_token_id is None:
@@ -145,14 +149,19 @@ def _validate_request(request: BeamBatchRequest, vllm_config: Any) -> None:
                 f"{model_config.max_model_len}"
             )
     scheduler_config = vllm_config.scheduler_config
-    if len(request.items) > getattr(scheduler_config, "max_num_seqs", len(request.items)):
-        raise BeamSearchRequestError("Beam batch size exceeds max_num_seqs")
-    total_prompt_tokens = sum(prompt_lengths)
-    if total_prompt_tokens > scheduler_config.max_num_batched_tokens:
-        raise BeamSearchRequestError(
-            f"Prefill length {total_prompt_tokens} exceeds max_num_batched_tokens "
-            f"{scheduler_config.max_num_batched_tokens}"
+    try:
+        validate_prompt_lengths(
+            prompt_lengths, token_budget=scheduler_config.max_num_batched_tokens
         )
+        validate_batch_sequence_limit(
+            len(request.items),
+            max_num_seqs=getattr(scheduler_config, "max_num_seqs", len(request.items)),
+        )
+        validate_prefill_token_budget(
+            sum(prompt_lengths), token_budget=scheduler_config.max_num_batched_tokens
+        )
+    except ValueError as error:
+        raise BeamSearchRequestError(str(error)) from error
 
 
 def _create_batch_request(

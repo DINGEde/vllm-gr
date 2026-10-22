@@ -12,6 +12,16 @@ class BeamSearchRequestError(ValueError):
     """A request that cannot be admitted as a GR batch session."""
 
 
+class BeamSearchAdmissionError(VLLMValidationError):
+    """The engine refused a session before it started.
+
+    A subclass rather than a bare ``VLLMValidationError``: the split-batch
+    route has to answer a refusal of a grouping it chose as a server-side 503,
+    while every other invalid request stays a caller error. The distinct type
+    is what lets that route convert one and not the other.
+    """
+
+
 class BeamSearchEngineError(RuntimeError):
     """A typed Frontend view of an EngineCore session failure."""
 
@@ -30,5 +40,5 @@ def failure_exception(failure: BeamBatchFailure) -> Exception:
     engine error would file a client mistake under server faults.
     """
     if failure.code == ADMISSION_REJECTED_CODE:
-        return VLLMValidationError(failure.message)
+        return BeamSearchAdmissionError(failure.message)
     return BeamSearchEngineError(failure)

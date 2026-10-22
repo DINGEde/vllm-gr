@@ -6,22 +6,29 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable
+from http import HTTPStatus
 from types import MethodType, SimpleNamespace
 from typing import Any
 from unittest.mock import Mock
 
 import pytest
 from vllm.entrypoints.openai.completion.serving import OpenAIServingCompletion
+from vllm.exceptions import VLLMValidationError
 
 import vllm_gr.entrypoints.openai.completion_batch_patch as patch_module
 from vllm_gr.config import DEFAULT_ONLINE_BATCH_SIZES, BeamExecutionMode, GRConfig
+from vllm_gr.entrypoints.beam_search_v1.exceptions import failure_exception
 from vllm_gr.entrypoints.openai.completion_batch_patch import (
     _batch_size,
     _create_completion_batched,
     create_completion_batch_dispatch,
     patch_completion_batch,
 )
-from vllm_gr.entrypoints.openai.completion_batch_plan import CompletionBatch
+from vllm_gr.entrypoints.openai.completion_batch_plan import (
+    CompletionBatch,
+    CompletionBatchPlan,
+)
+from vllm_gr.v1.beam.batch_contracts import ADMISSION_REJECTED_CODE, BeamBatchFailure
 
 _EQUAL_LENGTHS = dict.fromkeys(range(4), 10)
 
@@ -31,6 +38,7 @@ class _ModeStub:
 
     beam_execution_mode = BeamExecutionMode.V1
     beam_online_batch_sizes = DEFAULT_ONLINE_BATCH_SIZES
+    beam_max_decode_steps = 3
 
     @classmethod
     def from_vllm_config(cls, vllm_config: object) -> _ModeStub:
@@ -98,7 +106,10 @@ class _BatchSelf:
 
     def beam_search(self, **kwargs: Any) -> Any:
         self.beam_calls.append(kwargs)
-        outputs = [SimpleNamespace(prompt=None) for _ in kwargs["prompt"]]
+        outputs = [
+            SimpleNamespace(prompt=None, outputs=[SimpleNamespace(finish_reason="length")])
+            for _ in kwargs["prompt"]
+        ]
 
         async def generator() -> Any:
             for output in outputs:
@@ -128,10 +139,12 @@ def make_serving(monkeypatch: pytest.MonkeyPatch) -> Callable[..., _BatchSelf]:
         )
         for name, value in kwargs.items():
             setattr(serving, name, value)
+        # A legal effective N=3 budget; tests that care about disagreement
+        # override this with per-length values.
         monkeypatch.setattr(
             patch_module,
             "get_max_tokens",
-            lambda _len, _max, input_length, _default, _override, **_: 1000 - input_length,
+            lambda _len, _max, _input_length, _default, _override, **_: 3,
         )
         return serving
 
@@ -153,7 +166,7 @@ def make_request() -> Callable[..., Any]:
             "use_beam_search": True,
             "stream": False,
             "prompt_embeds": None,
-            "max_tokens": 5,
+            "max_tokens": 3,
             "truncate_prompt_tokens": None,
             "request_id": "request-0",
             "to_beam_search_params": lambda tokens, _defaults: {"max_tokens": tokens},
@@ -277,22 +290,26 @@ def test_a_batch_renders_once_and_submits_once(
     serving: _BatchSelf, make_request: Callable[..., Any], logged: Mock
 ) -> None:
     """Four prompts are one render, one session, and one response."""
-    to_params = Mock(return_value={"max_tokens": 990})
+    to_params = Mock(return_value={"max_tokens": 3})
     request = make_request(to_beam_search_params=to_params)
     assert asyncio.run(create_completion_batch_dispatch(serving, request)) == ("response-for-4")
     assert serving.render_calls == 1
     assert [call["prompt"] for call in serving.beam_calls] == [[0, 1, 2, 3]]
-    to_params.assert_called_once_with(990, serving.default_sampling_params)
-    assert serving.beam_calls[0]["params"] == {"max_tokens": 990}
+    to_params.assert_called_once_with(3, serving.default_sampling_params)
+    assert serving.beam_calls[0]["params"] == {"max_tokens": 3}
     assert serving.logged == [f"cmpl-request-0-{i}" for i in range(4)]
     assert len(serving.response_calls) == 1
     assert [res.prompt for res in serving.response_calls[0]] == [f"text-{i}" for i in range(4)]
     assert logged.call_args.args == (
-        "Beam batch plan request_id=%s prompts=%d sub_batches=%d sizes=%s",
+        "Beam batch plan request_id=%s prompts=%d sub_batches=%d sizes=%s "
+        "configured_sizes=%s usable_sizes=%s reasons=%s",
         "cmpl-request-0",
         4,
         1,
         [4],
+        (4, 2, 1),
+        (4, 2, 1),
+        (),
     )
 
 
@@ -345,7 +362,7 @@ def test_different_lengths_can_share_the_real_generation_budget(
     asyncio.run(create_completion_batch_dispatch(serving, make_request()))
 
     assert len(serving.beam_calls) == 1
-    assert serving.beam_calls[0]["params"]["max_tokens"] == 5
+    assert serving.beam_calls[0]["params"]["max_tokens"] == 3
 
 
 # --------------------------------------------------------------------------- #
@@ -381,7 +398,8 @@ def test_an_arbitrary_prompt_list_is_split_into_contiguous_batches(
     assert [i for call in serving.beam_calls for i in call["prompt"]] == list(range(count))
     assert serving.render_calls == 1
     assert len(serving.response_calls) == 1
-    assert logged.call_args.args[3:] == (len(sizes), sizes)
+    # prompts, sub_batches, sizes, configured_sizes, usable_sizes, reasons
+    assert logged.call_args.args[3:] == (len(sizes), sizes, (4, 2, 1), (4, 2, 1), ())
 
 
 @pytest.mark.parametrize(  # type: ignore[misc]
@@ -468,22 +486,89 @@ def test_a_prompt_list_is_validated_before_the_first_submission(
     assert delegate == []
 
 
+def test_an_illegal_last_budget_is_rejected_before_the_first_submission(
+    make_serving: Callable[..., _BatchSelf],
+    make_request: Callable[..., Any],
+    delegate: list[Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The last input is judged with every other input, not after they ran.
+
+    A shorter context allowance can leave the last prompt with a budget the
+    engine cannot schedule; the planner must reject the whole list before the
+    first sub-batch is submitted.
+    """
+    from vllm.exceptions import VLLMValidationError
+
+    serving = make_serving(prompt_lengths={0: 10, 1: 10, 2: 10, 3: 20})
+    monkeypatch.setattr(
+        patch_module,
+        "get_max_tokens",
+        lambda _len, _max, input_length, _default, _override, **_: 4 if input_length == 20 else 3,
+    )
+
+    with pytest.raises(VLLMValidationError, match="Prompt 3 generation budget"):
+        asyncio.run(create_completion_batch_dispatch(serving, make_request()))
+
+    assert serving.beam_calls == []
+    assert delegate == []
+
+
+def test_boundary_tokens_that_consume_the_last_budget_are_rejected_first(
+    make_serving: Callable[..., _BatchSelf],
+    make_request: Callable[..., Any],
+    delegate: list[Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Two boundary tokens reserve two public positions on every prompt."""
+    from vllm.exceptions import VLLMValidationError
+
+    serving = make_serving(prompt_lengths={0: 10, 1: 10, 2: 10, 3: 20})
+    monkeypatch.setattr(
+        patch_module,
+        "get_max_tokens",
+        lambda _len, _max, input_length, _default, _override, **_: 2 if input_length == 20 else 3,
+    )
+    request = make_request(vllm_xargs={"begin_token": 1, "end_token": 2})
+
+    with pytest.raises(VLLMValidationError, match="Prompt 3 generation budget"):
+        asyncio.run(create_completion_batch_dispatch(serving, request))
+
+    assert serving.beam_calls == []
+    assert delegate == []
+
+
 def test_prompts_that_disagree_on_their_budget_keep_their_own(
-    make_serving: Callable[..., _BatchSelf], make_request: Callable[..., Any], delegate: list[Any]
+    make_serving: Callable[..., _BatchSelf],
+    make_request: Callable[..., Any],
+    delegate: list[Any],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Budgets stay per input: no prompt is shortened to match a neighbour.
 
-    Four prompts that agree on nothing the plan can join still come back as one
-    response from the route that claimed them -- the split is just trivial.
+    Only three effective budgets are legal, so three prompts that use all of
+    them cannot join any sub-batch; the split is trivial but still one response.
     """
-    serving = make_serving(prompt_lengths={0: 10, 1: 20, 2: 30, 3: 40})
-    request = make_request(to_beam_search_params=lambda tokens, _: {"max_tokens": tokens})
+    serving = make_serving(engine_inputs=[0, 1, 2], prompt_lengths={0: 10, 1: 20, 2: 30})
+    monkeypatch.setattr(
+        patch_module,
+        "get_max_tokens",
+        lambda _len, _max, input_length, _default, _override, **_: {
+            10: 3,
+            20: 2,
+            30: 1,
+        }[input_length],
+    )
+    request = make_request(
+        prompt=["a", "b", "c"],
+        to_beam_search_params=lambda tokens, _: {"max_tokens": tokens},
+    )
 
-    assert asyncio.run(create_completion_batch_dispatch(serving, request)) == "response-for-4"
+    assert asyncio.run(create_completion_batch_dispatch(serving, request)) == "response-for-3"
 
     assert delegate == []
-    assert [call["params"]["max_tokens"] for call in serving.beam_calls] == [990, 980, 970, 960]
-    assert [call["prompt"] for call in serving.beam_calls] == [[0], [1], [2], [3]]
+    assert [call["params"]["max_tokens"] for call in serving.beam_calls] == [3, 2, 1]
+    assert [call["prompt"] for call in serving.beam_calls] == [[0], [1], [2]]
     assert serving.render_calls == 1
 
 
@@ -512,6 +597,153 @@ def test_the_begin_token_counts_towards_the_token_budget(
     asyncio.run(create_completion_batch_dispatch(serving, request))
 
     assert [call["prompt"] for call in serving.beam_calls] == [[0, 1], [2, 3]]
+
+
+def test_an_empty_render_needs_the_begin_token_to_be_schedulable(
+    make_serving: Callable[..., _BatchSelf],
+    make_request: Callable[..., Any],
+    delegate: list[Any],
+) -> None:
+    """An empty prompt renders to zero tokens when the tokenizer adds no BOS.
+
+    The engine rejects a zero-token prompt, so the list is refused before the
+    first submission. With a begin token the same render is one token long and
+    runs: that token is what the engine appends, not something the renderer
+    produces.
+    """
+    from vllm.exceptions import VLLMValidationError
+
+    serving = make_serving(engine_inputs=[0, 1], prompt_lengths={0: 0, 1: 10})
+    request = make_request(prompt=["", "a"])
+
+    with pytest.raises(VLLMValidationError, match="Prompt 0 Prefill length 0"):
+        asyncio.run(create_completion_batch_dispatch(serving, request))
+
+    assert serving.beam_calls == []
+    assert delegate == []
+
+    request = make_request(prompt=["", "a"], vllm_xargs={"begin_token": 1})
+    assert asyncio.run(create_completion_batch_dispatch(serving, request)) == "response-for-2"
+    assert [call["prompt"] for call in serving.beam_calls] == [[0, 1]]
+
+
+# --------------------------------------------------------------------------- #
+# Degradation: name why a plan lost width, and warn only when it is unexpected
+# --------------------------------------------------------------------------- #
+
+
+def test_plan_reasons_name_the_static_limit(
+    make_serving: Callable[..., _BatchSelf],
+    make_request: Callable[..., Any],
+    logged: Mock,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    serving = make_serving(engine_inputs=[0, 1, 2], prompt_lengths={0: 10, 1: 20, 2: 30})
+    monkeypatch.setattr(
+        patch_module,
+        "get_max_tokens",
+        lambda _len, _max, input_length, _default, _override, **_: {
+            10: 3,
+            20: 2,
+            30: 1,
+        }[input_length],
+    )
+
+    asyncio.run(create_completion_batch_dispatch(serving, make_request(prompt=["a", "b", "c"])))
+
+    assert logged.call_args.args[5:] == (
+        (4, 2, 1),
+        (4, 2, 1),
+        ("unequal_effective_budgets",),
+    )
+
+
+def test_sequence_capacity_is_recorded_without_a_warning(
+    make_serving: Callable[..., _BatchSelf],
+    make_request: Callable[..., Any],
+    logged: Mock,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    warning = Mock()
+    monkeypatch.setattr(patch_module.logger, "warning", warning)
+    serving = make_serving(max_num_seqs=2)
+
+    asyncio.run(create_completion_batch_dispatch(serving, make_request()))
+
+    assert [len(call["prompt"]) for call in serving.beam_calls] == [2, 2]
+    assert logged.call_args.args[5:] == ((4, 2, 1), (2, 1), ("sequence_capacity",))
+    assert warning.call_count == 0
+
+
+def test_capacity_one_never_warns(
+    make_serving: Callable[..., _BatchSelf],
+    make_request: Callable[..., Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    warning = Mock()
+    monkeypatch.setattr(patch_module.logger, "warning", warning)
+    serving = make_serving(max_num_seqs=1)
+
+    asyncio.run(create_completion_batch_dispatch(serving, make_request()))
+
+    assert [len(call["prompt"]) for call in serving.beam_calls] == [1, 1, 1, 1]
+    assert warning.call_count == 0
+
+
+def test_configured_singletons_never_warn(
+    make_serving: Callable[..., _BatchSelf],
+    make_request: Callable[..., Any],
+    logged: Mock,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    warning = Mock()
+    monkeypatch.setattr(patch_module.logger, "warning", warning)
+    monkeypatch.setattr(_ModeStub, "beam_online_batch_sizes", [1])
+    serving = make_serving()
+
+    asyncio.run(create_completion_batch_dispatch(serving, make_request()))
+
+    assert [len(call["prompt"]) for call in serving.beam_calls] == [1, 1, 1, 1]
+    assert logged.call_args.args[5:] == ((1,), (1,), ("configured_singletons",))
+    assert warning.call_count == 0
+
+
+def test_unexpected_singletons_warn_once_per_interval(
+    make_serving: Callable[..., _BatchSelf],
+    make_request: Callable[..., Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    warning = Mock()
+    monkeypatch.setattr(patch_module.logger, "warning", warning)
+    monkeypatch.setattr(patch_module, "_singleton_warning_at", None)
+    monkeypatch.setattr(patch_module, "_singleton_warnings_suppressed", 0)
+    serving = make_serving(engine_inputs=[0, 1, 2], prompt_lengths={0: 10, 1: 20, 2: 30})
+    monkeypatch.setattr(
+        patch_module,
+        "get_max_tokens",
+        lambda _len, _max, input_length, _default, _override, **_: {
+            10: 3,
+            20: 2,
+            30: 1,
+        }[input_length],
+    )
+    request = make_request(prompt=["a", "b", "c"])
+
+    asyncio.run(create_completion_batch_dispatch(serving, request))
+    assert warning.call_count == 1
+    assert warning.call_args.args[1:] == (
+        "cmpl-request-0",
+        3,
+        (4, 2, 1),
+        (4, 2, 1),
+        ("unequal_effective_budgets",),
+        0,
+    )
+
+    # The next degraded plan inside the interval is counted, not logged.
+    asyncio.run(create_completion_batch_dispatch(serving, request))
+    assert warning.call_count == 1
+    assert patch_module._singleton_warnings_suppressed == 1
 
 
 @pytest.mark.parametrize(  # type: ignore[misc]
@@ -561,7 +793,9 @@ def test_a_failure_mid_list_never_submits_another_session(
                     if failure == "short":
                         return
                 for _ in kwargs["prompt"]:
-                    yield SimpleNamespace(prompt=None)
+                    yield SimpleNamespace(
+                        prompt=None, outputs=[SimpleNamespace(finish_reason="length")]
+                    )
             finally:
                 events.append(("close", number))
                 if number == 1 and failure == "cleanup":
@@ -585,6 +819,202 @@ def test_a_failure_mid_list_never_submits_another_session(
     assert delegate == []
 
 
+@pytest.fixture  # type: ignore[misc]
+def refuse_second(monkeypatch: pytest.MonkeyPatch) -> Callable[..., Any]:
+    """Make the second sub-batch fail at its first step, holding one refusal."""
+
+    def _install(serving: _BatchSelf, failure: BaseException | None) -> dict[str, Any]:
+        monkeypatch.setattr(
+            patch_module,
+            "get_max_tokens",
+            lambda _len, _max, input_length, _default, _override, **_: {
+                10: 3,
+                20: 2,
+                30: 1,
+            }[input_length],
+        )
+        state: dict[str, Any] = {"refuse": failure is not None, "active": 0, "closed": []}
+
+        def beam_search(**kwargs: Any) -> Any:
+            number = len(serving.beam_calls)
+            serving.beam_calls.append(kwargs)
+            refused = state["refuse"] and number == 1
+
+            async def generator() -> Any:
+                state["active"] += 1
+                try:
+                    await asyncio.sleep(0)
+                    if refused:
+                        assert failure is not None
+                        raise failure
+                    for _ in kwargs["prompt"]:
+                        yield SimpleNamespace(
+                            prompt=None, outputs=[SimpleNamespace(finish_reason="length")]
+                        )
+                finally:
+                    state["active"] -= 1
+                    state["closed"].append(number)
+
+            return generator()
+
+        serving.beam_search = beam_search  # type: ignore[method-assign]
+        return state
+
+    return _install
+
+
+def test_a_later_admission_rejection_is_retryable_and_never_repeats_work(
+    make_serving: Callable[..., _BatchSelf],
+    make_request: Callable[..., Any],
+    delegate: list[Any],
+    refuse_second: Callable[..., dict[str, Any]],
+) -> None:
+    """A group the engine refuses is a server decision, not a caller mistake.
+
+    The first sub-batch completed and the second was refused for admission.
+    The V1 frontend raises the typed refusal before it yields anything, so this
+    raises the exception the real client raises instead of inventing an error
+    output the frontend never produces. The caller gets one 503 that names the
+    refused group; the third sub-batch is never submitted, the completed
+    outputs are not returned as a partial success, and the next request starts
+    from a released engine.
+    """
+    serving = make_serving(engine_inputs=[0, 1, 2], prompt_lengths={0: 10, 1: 20, 2: 30})
+    # The real client converts the engine's terminal failure through
+    # ``failure_exception`` before it yields anything; raise exactly that.
+    refusal = failure_exception(
+        BeamBatchFailure(ADMISSION_REJECTED_CODE, "another beam session owns the engine", None)
+    )
+    state = refuse_second(serving, refusal)
+    request = make_request(
+        prompt=["a", "b", "c"],
+        to_beam_search_params=lambda tokens, _: {"max_tokens": tokens},
+    )
+
+    assert asyncio.run(create_completion_batch_dispatch(serving, request)) == "error-response"
+    message, error_kwargs = serving.error
+    assert error_kwargs == {
+        "err_type": "ServiceUnavailableError",
+        "status_code": HTTPStatus.SERVICE_UNAVAILABLE,
+    }
+    assert "sub-batch 1 of 3" in message
+    assert "after 1 completed sub-batches" in message
+    assert "not retried" in message
+    assert "another beam session owns the engine" in message
+    # No partial success: the completed sub-batch is not converted to a response.
+    assert serving.response_calls == []
+    assert [call["request_id"] for call in serving.beam_calls] == [
+        "cmpl-request-0-batch-0",
+        "cmpl-request-0-batch-1",
+    ]
+    assert state["closed"] == [0, 1]
+    assert state["active"] == 0
+    assert delegate == []
+
+    # The next request plans from scratch and runs every sub-batch.
+    state["refuse"] = False
+    assert asyncio.run(create_completion_batch_dispatch(serving, request)) == "response-for-3"
+    assert [call["request_id"] for call in serving.beam_calls[2:]] == [
+        "cmpl-request-0-batch-0",
+        "cmpl-request-0-batch-1",
+        "cmpl-request-0-batch-2",
+    ]
+    assert state["closed"] == [0, 1, 2, 3, 4]
+    assert state["active"] == 0
+
+
+def test_an_ordinary_validation_error_is_not_converted_to_service_unavailable(
+    make_serving: Callable[..., _BatchSelf],
+    make_request: Callable[..., Any],
+    refuse_second: Callable[..., dict[str, Any]],
+) -> None:
+    """Only the typed refusal is a 503; a rejected request stays a caller error."""
+    serving = make_serving(engine_inputs=[0, 1, 2], prompt_lengths={0: 10, 1: 20, 2: 30})
+    state = refuse_second(serving, VLLMValidationError("prompt is too long"))
+
+    with pytest.raises(VLLMValidationError, match="prompt is too long"):
+        asyncio.run(
+            create_completion_batch_dispatch(
+                serving,
+                make_request(
+                    prompt=["a", "b", "c"],
+                    to_beam_search_params=lambda tokens, _: {"max_tokens": tokens},
+                ),
+            )
+        )
+    assert getattr(serving, "error", None) is None
+    assert len(serving.beam_calls) == 2
+    assert state["closed"] == [0, 1]
+    assert state["active"] == 0
+    assert serving.response_calls == []
+
+
+def test_an_error_output_is_an_internal_error_and_never_a_partial_success(
+    make_serving: Callable[..., _BatchSelf], make_request: Callable[..., Any]
+) -> None:
+    """The V1 frontend raises instead of yielding these; if one appears, fail closed."""
+    serving = make_serving(engine_inputs=[0, 1, 2], prompt_lengths={0: 10, 1: 10, 2: 10})
+
+    def beam_search(**kwargs: Any) -> Any:
+        serving.beam_calls.append(kwargs)
+
+        async def generator() -> Any:
+            for _ in kwargs["prompt"]:
+                yield SimpleNamespace(prompt=None, outputs=[SimpleNamespace(finish_reason="error")])
+
+        return generator()
+
+    serving.beam_search = beam_search  # type: ignore[method-assign]
+
+    assert (
+        asyncio.run(create_completion_batch_dispatch(serving, make_request(prompt=["a", "b", "c"])))
+        == "error-response"
+    )
+    message, error_kwargs = serving.error
+    assert error_kwargs == {
+        "err_type": "InternalServerError",
+        "status_code": HTTPStatus.INTERNAL_SERVER_ERROR,
+    }
+    assert "returned an error output" in message
+    assert serving.response_calls == []
+
+
+def test_the_last_input_exceeding_the_configured_decode_cap_submits_nothing(
+    make_serving: Callable[..., _BatchSelf],
+    make_request: Callable[..., Any],
+    delegate: list[Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A cap the engine enforces is checked for every input before the first submit.
+
+    The deployment allows two Decode steps; the third input asks for three. The
+    planner must reject the list, so the first two prompts are never computed
+    only for the request to fail on the last one.
+    """
+    serving = make_serving(engine_inputs=[0, 1, 2], prompt_lengths={0: 10, 1: 20, 2: 30})
+    monkeypatch.setattr(_ModeStub, "beam_max_decode_steps", 2)
+    monkeypatch.setattr(
+        patch_module,
+        "get_max_tokens",
+        lambda _len, _max, input_length, _default, _override, **_: {
+            10: 1,
+            20: 1,
+            30: 3,
+        }[input_length],
+    )
+
+    with pytest.raises(
+        VLLMValidationError,
+        match="Prompt 2 generation budget 3 leaves 3 Decode steps.*beam_max_decode_steps limit is 2",
+    ):
+        asyncio.run(create_completion_batch_dispatch(serving, make_request(prompt=["a", "b", "c"])))
+    assert serving.render_calls == 1
+    assert serving.beam_calls == []
+    assert serving.logged == []
+    assert serving.response_calls == []
+    assert delegate == []
+
+
 def test_cancellation_between_sessions_prevents_the_next_submission(
     make_serving: Callable[..., _BatchSelf], make_request: Callable[..., Any]
 ) -> None:
@@ -595,7 +1025,9 @@ def test_cancellation_between_sessions_prevents_the_next_submission(
 
         async def generator() -> Any:
             for _ in kwargs["prompt"]:
-                yield SimpleNamespace(prompt=None)
+                yield SimpleNamespace(
+                    prompt=None, outputs=[SimpleNamespace(finish_reason="length")]
+                )
             task = asyncio.current_task()
             assert task is not None
             task.cancel()
@@ -626,7 +1058,9 @@ def test_cancellation_waits_for_the_running_iterator_to_close(
                 try:
                     started.set()
                     await asyncio.Event().wait()
-                    yield SimpleNamespace(prompt=None)
+                    yield SimpleNamespace(
+                        prompt=None, outputs=[SimpleNamespace(finish_reason="length")]
+                    )
                 finally:
                     await asyncio.sleep(0)
                     closed.set()
@@ -671,7 +1105,7 @@ def test_a_short_result_batch_is_a_server_fault(
 
     def short(**kwargs: Any) -> Any:
         async def generator() -> Any:
-            yield SimpleNamespace(prompt=None)
+            yield SimpleNamespace(prompt=None, outputs=[SimpleNamespace(finish_reason="length")])
 
         return generator()
 
@@ -698,7 +1132,12 @@ def test_a_cancelled_client_is_answered_rather_than_raised(
 
     serving.beam_search = cancelled  # type: ignore[method-assign]
 
-    plan = (CompletionBatch(start=0, stop=1, max_tokens=5),)
+    plan = CompletionBatchPlan(
+        batches=(CompletionBatch(start=0, stop=1, max_tokens=3),),
+        configured_sizes=(1,),
+        usable_sizes=(1,),
+        reasons=("configured_singletons",),
+    )
     result = asyncio.run(_create_completion_batched(serving, request, None, [0], plan))
 
     assert result == "error-response"
@@ -759,7 +1198,7 @@ def test_real_response_conversion_preserves_indices_and_usage(
         model="a-model",
         prompt=["prompt"] * 6,
         n=2,
-        max_tokens=5,
+        max_tokens=3,
         use_beam_search=True,
         request_id="request-0",
         return_token_ids=True,
@@ -826,17 +1265,17 @@ def test_restore_route_preserves_preinstalled_fallback(
 @pytest.mark.parametrize(  # type: ignore[misc]
     ("device", "tokens", "width", "budget", "boundaries", "sizes"),
     [
-        # Adjusted budget (public budget minus boundary tokens) above one
-        # needs Decode rows; at or below one the list is Prefill-only and the
-        # planner may keep full sessions.
-        ("npu", 512, 256, 5, ("begin",), [2, 2]),
-        ("npu:0", 1023, 256, 5, ("begin",), [2, 2]),
-        ("npu", 1024, 256, 5, ("begin",), [4]),
-        ("npu", 512, 128, 5, ("begin",), [4]),
+        # The effective budget (public budget minus boundary tokens) is 1..3.
+        # Above one it needs Decode rows; at one the list is Prefill-only and
+        # the planner may keep full sessions.
+        ("npu", 512, 256, 5, ("begin", "end"), [2, 2]),
+        ("npu:0", 1023, 256, 5, ("begin", "end"), [2, 2]),
+        ("npu", 1024, 256, 5, ("begin", "end"), [4]),
+        ("npu", 512, 128, 5, ("begin", "end"), [4]),
         ("npu", 512, 256, 4, ("begin", "end"), [2, 2]),
         ("npu", 512, 256, 2, ("begin",), [4]),
         ("npu", 512, 256, 3, ("begin", "end"), [4]),
-        ("cuda", 512, 256, 5, ("begin",), [4]),
+        ("cuda", 512, 256, 5, ("begin", "end"), [4]),
     ],
 )
 def test_npu_decode_capacity_caps_each_sub_batch(

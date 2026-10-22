@@ -10,6 +10,7 @@ import pytest
 import torch
 
 from vllm_gr.constraints.backend import ConstraintMetadata, ConstraintOutput
+from vllm_gr.v1.beam.execution_batch import BeamExecutionContractError
 from vllm_gr.v1.beam.npu_execution_batch import (
     NPUBeamExecutionBatch,
     restore_npu_cache_pool_layout,
@@ -1124,6 +1125,38 @@ def test_npu_eager_decode_binds_winners_and_sampling_rows() -> None:
     assert remapped.temperature.tolist() == pytest.approx([0.5] * 3 + [0.9] * 3)
     assert remapped.top_p.tolist() == pytest.approx([0.8] * 3 + [0.7] * 3)
     assert source.temperature.tolist() == pytest.approx([0.5, 0.9])
+
+
+def test_npu_decode_binding_counts_capacity_in_physical_rows() -> None:
+    """The binding needs B*W slots, not B: every beam owns one row.
+
+    Ascend sizes ``input_ids`` and ``positions`` by ``max_num_tokens``
+    (``scheduler_config.max_num_batched_tokens``): vllm's GPUModelRunner
+    allocates both at that length and vllm-ascend keeps them for the PCP path.
+    The frontend's ``max_num_batched_tokens // beam_width`` cap therefore keeps
+    ``B*W`` at or below the real buffer, never at ``B*W // W``.
+    """
+    plan = NPUEagerStagePlan.from_scheduler_output(_eager_stage_output(kind="decode"))
+    rows = plan.execution.num_execution_rows
+    winners = torch.tensor([[11, 12, 13], [21, 22, 23]], dtype=torch.int32)
+
+    # A buffer exactly as long as the physical rows is enough; no width division.
+    exact = torch.zeros(rows, dtype=torch.int32)
+    plan.prepare_decode_inputs(exact, torch.zeros(rows, dtype=torch.int64), winners)
+    assert exact.tolist() == winners.reshape(-1).tolist()
+
+    with pytest.raises(BeamExecutionContractError, match="input_ids has insufficient"):
+        plan.prepare_decode_inputs(
+            torch.zeros(rows - 1, dtype=torch.int32),
+            torch.zeros(rows, dtype=torch.int64),
+            winners,
+        )
+    with pytest.raises(BeamExecutionContractError, match="positions has insufficient"):
+        plan.prepare_decode_inputs(
+            torch.zeros(rows, dtype=torch.int32),
+            torch.zeros(rows - 1, dtype=torch.int64),
+            winners,
+        )
 
 
 def test_npu_eager_attention_layout_keeps_request_ownership() -> None:

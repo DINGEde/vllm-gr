@@ -48,9 +48,36 @@ With compatible inputs and sufficient capacity:
 
 Only listed sizes are used. A non-default policy exceeding `max_num_seqs`
 is rejected at engine configuration. With `[1, 3]` and `max_num_seqs=4`, seven
-inputs become `3 + 3 + 1`, not `4 + 3`. The batch-plan INFO log reports the
-actual sizes. Output order, serial cleanup and cancellation semantics are
-unchanged. Direct offline/engine batch calls are not repartitioned by this policy.
+inputs become `3 + 3 + 1`, not `4 + 3`. Output order, serial cleanup and
+cancellation semantics are unchanged. Direct offline/engine batch calls are not
+repartitioned by this policy.
+
+Every plan logs the executed `sizes` together with `configured_sizes`,
+`usable_sizes` and `reasons`. `usable_sizes` is what capacity leaves after
+`max_num_seqs` and the NPU Decode row cap; `reasons` names the static limits
+that kept the plan narrow: `unequal_effective_budgets`, `sequence_capacity`,
+`configured_singletons` and `token_budget`. A list that ends up all singletons
+logs the same fields. When configuration and capacity would have allowed a
+larger batch, an all-singleton plan also emits one WARNING at most every five
+minutes, carrying the number of suppressed warnings since the last one. A
+configured policy of `[1]` or a capacity of one never warns.
+
+## Failure Reporting
+
+Every input is validated before the first sub-batch is submitted: prompt
+length, the scheduling token budget, `max_num_seqs`, and the effective
+generation budget after begin/end tokens are removed from `max_tokens`. The
+latter must leave 1 to 3 Decode steps per input and must not exceed the
+configured `beam_max_decode_steps`. A rejection the planner can
+decide statically is therefore answered as a caller error before anything runs,
+so no prompt is computed without a place for its answer.
+
+Device and KV admission remain the engine's decision. If the engine refuses a
+sub-batch this adapter assembled, the request is answered with HTTP 503
+`ServiceUnavailableError` naming the rejected sub-batch. Earlier sub-batches are
+not returned as partial output, and no sub-batch is retried: choosing the
+grouping was the server's decision, so a refused group is not reported as an
+invalid caller request.
 
 ## Performance Boundary
 

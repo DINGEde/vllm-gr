@@ -208,6 +208,20 @@ def test_online_request_without_a_tokenizer_names_the_startup_flag() -> None:
     assert (caught.value.parameter, caught.value.value) == ("skip_tokenizer_init", True)
 
 
+def test_a_zero_token_prompt_is_rejected_before_admission() -> None:
+    """The empty render the batch planner refuses is refused here too.
+
+    An empty string is not a zero-token prompt for every tokenizer: one with a
+    BOS renders a token. OneRec-1.7B's Qwen2 tokenizer adds none, so the render
+    is empty and the engine has nothing to Prefill.
+    """
+    engine = _make_engine()
+    params = BeamSearchParams(beam_width=2, max_tokens=3, ignore_eos=True)
+
+    with pytest.raises(BeamSearchRequestError, match="nonempty token prompt"):
+        _prepare_request(engine, [], params, online=True)
+
+
 @pytest.mark.parametrize("online", [False, True])  # type: ignore[misc]
 @pytest.mark.parametrize(
     "begin,end", [(None, None), ("<begin>", None), (None, "<end>"), ("<begin>", "<end>")]

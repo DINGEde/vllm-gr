@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import math
 import sys
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Annotated, Literal, NoReturn, TypeGuard
 
@@ -22,6 +23,10 @@ from vllm_gr.config import MAX_BEAM_WIDTH, SUPPORTED_BEAM_BATCH_SIZES
 
 BEAM_BATCH_PROTOCOL_VERSION = 1
 DEFAULT_CONSTRAINT_RESOURCE_ID = "default"
+# The Asynchronous scheduler accepts a fixed effective N=1/2/3 generation
+# budget after begin/end boundary tokens claim their public budget positions.
+MIN_EFFECTIVE_GENERATION_TOKENS = 1
+MAX_EFFECTIVE_GENERATION_TOKENS = 3
 # Terminal failure code for a request the engine refused before the session
 # started. It is the one code the frontend reports as a client error; every
 # other code means the engine or its Worker failed.
@@ -352,6 +357,98 @@ def validate_beam_batch_request(request: BeamBatchRequest) -> None:
             _fail("Beam batch items cannot carry pooling_params")
 
 
+def effective_generation_tokens(max_tokens: int, reserved_tokens: int = 0) -> int:
+    """Decode steps left after begin/end tokens claim public budget positions."""
+    return max_tokens - reserved_tokens
+
+
+def effective_generation_budget_error(
+    max_tokens: int,
+    reserved_tokens: int = 0,
+    *,
+    name: str = "max_tokens",
+    max_decode_steps: int | None = None,
+) -> str | None:
+    """Explain why the effective generation budget is illegal, or return None.
+
+    The engine stores the post-reservation count as ``BeamBatchParams.max_tokens``
+    and accepts exactly N=1/2/3 Decode steps. A deployment may narrow that
+    further with ``beam_max_decode_steps``, which the engine enforces at
+    admission; passing it here lets a caller reject a list before submitting any
+    of it. Every bound is static.
+    """
+    if type(max_tokens) is not int:
+        return f"{name} must be an integer"
+    if type(reserved_tokens) is not int or reserved_tokens < 0:
+        return "Reserved begin/end tokens must be a non-negative integer"
+    if max_decode_steps is not None and (type(max_decode_steps) is not int or max_decode_steps < 1):
+        return f"Configured beam_max_decode_steps {max_decode_steps!r} must be a positive integer"
+    effective = effective_generation_tokens(max_tokens, reserved_tokens)
+    if effective < MIN_EFFECTIVE_GENERATION_TOKENS:
+        return (
+            f"{name} {max_tokens} must leave at least "
+            f"{MIN_EFFECTIVE_GENERATION_TOKENS} Decode step after "
+            f"{reserved_tokens} begin/end tokens"
+        )
+    if effective > MAX_EFFECTIVE_GENERATION_TOKENS:
+        return (
+            f"{name} {max_tokens} leaves {effective} Decode steps after "
+            f"{reserved_tokens} begin/end tokens; asynchronous scheduling "
+            f"accepts at most {MAX_EFFECTIVE_GENERATION_TOKENS}"
+        )
+    if max_decode_steps is not None and effective > max_decode_steps:
+        return (
+            f"{name} {max_tokens} leaves {effective} Decode steps after "
+            f"{reserved_tokens} begin/end tokens; the configured "
+            f"beam_max_decode_steps limit is {max_decode_steps}"
+        )
+    return None
+
+
+def select_supported_batch_sizes(
+    supported_sizes: Sequence[int],
+    *,
+    max_num_seqs: int,
+) -> tuple[int, ...]:
+    """Return the configured sizes usable under ``max_num_seqs``, largest first."""
+    if type(max_num_seqs) is not int or max_num_seqs < 1:
+        _fail("Beam batch capacity must be positive")
+    sizes = tuple(
+        sorted({size for size in supported_sizes if 0 < size <= max_num_seqs}, reverse=True)
+    )
+    if 1 not in sizes:
+        _fail("Beam batching requires singleton support")
+    return sizes
+
+
+def validate_prompt_lengths(prompt_lengths: Sequence[int], *, token_budget: int) -> None:
+    """Validate each Prefill length against the static scheduling token budget."""
+    if type(token_budget) is not int or token_budget < 1:
+        _fail("Beam batch capacity must be positive")
+    for index, length in enumerate(prompt_lengths):
+        if type(length) is not int or length < 1 or length > token_budget:
+            _fail(
+                f"Prompt {index} Prefill length {length} must be between 1 and "
+                f"the scheduling token budget {token_budget}"
+            )
+
+
+def validate_batch_sequence_limit(batch_size: int, *, max_num_seqs: int) -> None:
+    """Validate the static sequence cap of one logical batch."""
+    if type(max_num_seqs) is not int or max_num_seqs < 1:
+        _fail("Beam batch capacity must be positive")
+    if type(batch_size) is not int or batch_size > max_num_seqs:
+        _fail(f"Beam batch size {batch_size} exceeds max_num_seqs {max_num_seqs}")
+
+
+def validate_prefill_token_budget(total_tokens: int, *, token_budget: int) -> None:
+    """Validate the static aggregate Prefill budget of one logical batch."""
+    if type(token_budget) is not int or token_budget < 1:
+        _fail("Beam batch capacity must be positive")
+    if total_tokens > token_budget:
+        _fail(f"Prefill length {total_tokens} exceeds the scheduling token budget {token_budget}")
+
+
 def validate_beam_batch_limits(limits: BeamBatchLimits) -> None:
     if not isinstance(limits, BeamBatchLimits):
         _fail("limits must be BeamBatchLimits")
@@ -497,6 +594,8 @@ def validate_beam_batch_result(
 __all__ = [
     "BEAM_BATCH_PROTOCOL_VERSION",
     "DEFAULT_CONSTRAINT_RESOURCE_ID",
+    "MAX_EFFECTIVE_GENERATION_TOKENS",
+    "MIN_EFFECTIVE_GENERATION_TOKENS",
     "SUPPORTED_BEAM_BATCH_SIZES",
     "BeamBatchFailure",
     "BeamBatchItem",
@@ -509,8 +608,14 @@ __all__ = [
     "BeamOutputOptions",
     "BeamOutputSequence",
     "BeamRequestOutput",
+    "effective_generation_budget_error",
+    "effective_generation_tokens",
+    "select_supported_batch_sizes",
+    "validate_batch_sequence_limit",
     "validate_beam_batch_limits",
     "validate_beam_batch_request",
     "validate_beam_batch_request_limits",
     "validate_beam_batch_result",
+    "validate_prefill_token_budget",
+    "validate_prompt_lengths",
 ]
