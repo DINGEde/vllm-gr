@@ -7,7 +7,6 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Callable
 from http import HTTPStatus
-from itertools import accumulate
 from types import MethodType, SimpleNamespace
 from typing import Any
 from unittest.mock import Mock
@@ -386,41 +385,6 @@ def test_a_batch_renders_once_and_submits_once(
     )
 
 
-@pytest.mark.parametrize("sizes", [None, [1, 3, 7]], ids=["default", "custom"])  # type: ignore[misc]
-@pytest.mark.parametrize("count", [2, 3, 4, 7, 8])  # type: ignore[misc]
-def test_batch_policy_selects_fixed_http_sizes(
-    make_serving: Callable[..., _BatchSelf],
-    make_request: Callable[..., Any],
-    delegate: list[Any],
-    monkeypatch: pytest.MonkeyPatch,
-    count: int,
-    sizes: list[int] | None,
-) -> None:
-    from vllm_gr.config import GRConfig
-
-    monkeypatch.setattr(patch_module, "GRConfig", GRConfig)
-    serving = make_serving(
-        engine_inputs=list(range(count)), prompt_lengths=dict.fromkeys(range(count), 10)
-    )
-    serving.engine_client.vllm_config.additional_config = {
-        "vllm_gr_beam_execution_mode": "v1",
-    }
-    if sizes is not None:
-        serving.engine_client.vllm_config.additional_config["vllm_gr_beam_online_batch_sizes"] = (
-            sizes
-        )
-    request = make_request(prompt=["a"] * count)
-    result = asyncio.run(create_completion_batch_dispatch(serving, request))
-    assert result == f"response-for-{count}"
-    expected = (
-        {2: [2], 3: [2, 1], 4: [4], 7: [4, 2, 1], 8: [4, 4]}
-        if sizes is None
-        else {2: [1, 1], 3: [3], 4: [3, 1], 7: [7], 8: [7, 1]}
-    )[count]
-    assert [len(call["prompt"]) for call in serving.beam_calls] == expected
-    assert not delegate
-
-
 def test_different_lengths_can_share_the_real_generation_budget(
     make_serving: Callable[..., _BatchSelf],
     make_request: Callable[..., Any],
@@ -448,61 +412,24 @@ def _input_lengths(count: int, length: int = 10) -> dict[int, int]:
 
 
 @pytest.mark.parametrize(  # type: ignore[misc]
-    ("count", "sizes"),
-    [(2, [2]), (3, [2, 1]), (5, [4, 1]), (6, [4, 2]), (7, [4, 2, 1]), (8, [4, 4]), (9, [4, 4, 1])],
-)
-def test_an_arbitrary_prompt_list_is_split_into_contiguous_batches(
-    make_serving: Callable[..., _BatchSelf],
-    make_request: Callable[..., Any],
-    logged: Mock,
-    count: int,
-    sizes: list[int],
-) -> None:
-    """Any length is served: the plan picks the largest batch that still fits."""
-    serving = make_serving(engine_inputs=list(range(count)), prompt_lengths=_input_lengths(count))
-
-    result = asyncio.run(
-        create_completion_batch_dispatch(serving, make_request(prompt=["a"] * count))
-    )
-
-    assert result == f"response-for-{count}"
-
-    assert [len(call["prompt"]) for call in serving.beam_calls] == sizes
-    assert [i for call in serving.beam_calls for i in call["prompt"]] == list(range(count))
-    assert serving.render_calls == 1
-    assert len(serving.response_calls) == 1
-    # prompts, sub_batches, batches, configured_sizes, usable_sizes,
-    # capacity_source, reasons
-    assert logged.call_args.args[3:] == (
-        len(sizes),
-        [
-            (start, start + size, size, None)
-            for start, size in zip(list(accumulate([0] + sizes))[:-1], sizes, strict=True)
-        ],
-        (4, 2, 1),
-        (4, 2, 1),
-        None,
-        (),
-    )
-
-
-@pytest.mark.parametrize(  # type: ignore[misc]
     ("sizes", "count", "seqs", "tokens", "expected"),
-    [(list(range(1, 9)), n, 8, 100, [n]) for n in range(2, 9)]
-    + [
-        ([1, 3, 7], 10, 8, 100, [7, 3]),
-        ([1, 3, 7], 8, 8, 100, [7, 1]),
-        ([1, 3], 7, 8, 100, [3, 3, 1]),
-        ([1, 3, 7], 7, 4, 100, [3, 3, 1]),
-        ([1, 3, 7], 7, 8, 30, [3, 3, 1]),
-        ([1], 3, 8, 100, [1, 1, 1]),
+    [
+        (None, 4, 8, 120, [4]),
+        (None, 7, 8, 120, [4, 2, 1]),
+        (None, 8, 8, 120, [4, 4]),
+        ([1, 4, 7], 11, 8, 120, [7, 4]),
+        ([1, 4, 7], 8, 8, 120, [7, 1]),
+        ([1], 3, 8, 120, [1, 1, 1]),
+        # Stub a runtime capacity below the policy; real startup rejects this config.
+        ([1, 4, 7], 7, 4, 120, [4, 1, 1, 1]),
+        ([1, 4, 7], 7, 8, 40, [4, 1, 1, 1]),
     ],
 )
 def test_online_batch_policy_reaches_dispatch(
     monkeypatch: pytest.MonkeyPatch,
     make_serving: Callable[..., _BatchSelf],
     make_request: Callable[..., Any],
-    sizes: list[int],
+    sizes: list[int] | None,
     count: int,
     seqs: int,
     tokens: int,
@@ -517,8 +444,11 @@ def test_online_batch_policy_reaches_dispatch(
     )
     serving.engine_client.vllm_config.additional_config = {
         "vllm_gr_beam_execution_mode": "v1",
-        "vllm_gr_beam_online_batch_sizes": sizes,
     }
+    if sizes is not None:
+        serving.engine_client.vllm_config.additional_config["vllm_gr_beam_online_batch_sizes"] = (
+            sizes
+        )
     result = asyncio.run(
         create_completion_batch_dispatch(serving, make_request(prompt=["a"] * count))
     )

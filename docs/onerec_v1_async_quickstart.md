@@ -162,7 +162,7 @@ To select other sub-batch sizes, add this field to the existing
 ```yaml
 beam:
   execution_mode: v1
-  online_batch_sizes: [1, 3, 7]
+  online_batch_sizes: [1, 4, 7]
 ```
 
 Keep the existing model/constraint-table settings. Use `--max-num-seqs 7` or

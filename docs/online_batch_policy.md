@@ -14,14 +14,14 @@ configuration passed through `--vllm-gr-config`:
 ```yaml
 beam:
   execution_mode: v1
-  online_batch_sizes: [1, 3, 7]
+  online_batch_sizes: [1, 4, 7]
 ```
 
 This is a fragment, not a complete deployment configuration. Keep the existing
 model, constraint-table and other beam settings. Set `--max-num-seqs` high
 enough for the desired size, for example `8` to admit B=7 or B=8.
 The legacy additional-config equivalent is
-`"vllm_gr_beam_online_batch_sizes": [1, 3, 7]`; do not mix canonical and legacy
+`"vllm_gr_beam_online_batch_sizes": [1, 4, 7]`; do not mix canonical and legacy
 GR configuration keys. No per-request protocol field is added.
 
 The value must be a nonempty list of distinct integers in `[1, 8]` containing
@@ -42,8 +42,8 @@ With compatible inputs and sufficient capacity:
 | --- | --- | --- |
 | Default `[1, 2, 4]` | 7 | 4 + 2 + 1 |
 | `[1, 3]` | 7 | 3 + 3 + 1 |
-| `[1, 3, 7]` | 10 | 7 + 3 |
-| `[1, 3, 7]` | 8 | 7 + 1 |
+| `[1, 4, 7]` | 11 | 7 + 4 |
+| `[1, 4, 7]` | 8 | 7 + 1 |
 | `[1, 2, 3, 4, 5, 6, 7, 8]` | 8 | 8 |
 
 Only listed sizes are used. A non-default policy exceeding `max_num_seqs`

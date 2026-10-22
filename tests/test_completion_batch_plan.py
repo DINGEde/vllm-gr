@@ -191,16 +191,14 @@ def test_a_last_input_over_the_configured_cap_rejects_the_whole_list() -> None:
 def test_custom_sizes_respect_generation_budget_boundaries() -> None:
     plan = plan_completion_batches(
         [10] * 8,
-        [3] * 3 + [2] * 5,
-        configured_sizes=(1, 3, 7),
+        [3] * 4 + [2] * 4,
+        configured_sizes=(1, 4, 7),
         max_num_seqs=8,
         token_budget=100,
     )
     assert [(b.start, b.stop, b.max_tokens) for b in plan.batches] == [
-        (0, 3, 3),
-        (3, 6, 2),
-        (6, 7, 2),
-        (7, 8, 2),
+        (0, 4, 3),
+        (4, 8, 2),
     ]
 
 
