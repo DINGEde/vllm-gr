@@ -202,6 +202,25 @@ def test_custom_sizes_respect_generation_budget_boundaries() -> None:
     ]
 
 
+def test_capacity_never_introduces_a_size_the_policy_omits() -> None:
+    """A documented `[1, 3]` row: capacity only removes sizes, never adds one."""
+    plan = plan_completion_batches(
+        [10] * 7,
+        [3] * 7,
+        configured_sizes=(1, 3),
+        max_num_seqs=4,
+        token_budget=100,
+    )
+
+    # Seven inputs under max_num_seqs=4 stay 3 + 3 + 1: 4 is not configured,
+    # so neither capacity nor the leftover input can produce it.
+    assert [(b.start, b.stop) for b in plan.batches] == [(0, 3), (3, 6), (6, 7)]
+    assert plan.configured_sizes == (3, 1)
+    assert plan.usable_sizes == (3, 1)
+    assert plan.capacity_source is None
+    assert plan.reasons == ()
+
+
 def test_a_broken_progress_invariant_fails_instead_of_looping(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
