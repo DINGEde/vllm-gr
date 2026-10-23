@@ -487,6 +487,9 @@ async def _run_online_completion_batch(work_dir: Path) -> None:
         start += size
     if sizes != (1, 2, 4):
         windows.append((7, 1))
+    else:
+        # The mixed-width list lengths probed below: 3 = 2 + 1, 6 = 4 + 2.
+        windows += [(2, 1), (4, 2)]
     token_totals = {
         sum(len(p) + 1 for p in prompts[start : start + size]) for start, size in windows
     }
@@ -661,8 +664,11 @@ async def _run_online_completion_batch(work_dir: Path) -> None:
                     serving.create_completion = original_create
                 await wait_for_the_engine_to_settle()
                 rows.append(dict(note="ASGI disconnect after engine execution began"))
-                assert await engine.reset_prefix_cache()
-                await checked_post(prompts[:2], [2])
+                # Mixed-width list lengths, not only the 1/2/4/8 shapes:
+                # the default policy partitions 6 as 4 + 2 and 3 as 2 + 1.
+                for count, expected in ((6, [4, 2]), (3, [2, 1]), (2, [2])):
+                    assert await engine.reset_prefix_cache()
+                    await checked_post(prompts[:count], expected)
             else:
                 for count, expected in ((8, [7, 1]), (2, [1, 1])):
                     assert await engine.reset_prefix_cache()
