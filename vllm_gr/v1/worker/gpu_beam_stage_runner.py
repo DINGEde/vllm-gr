@@ -999,6 +999,27 @@ def get_stage_runner(
         or context.max_batch < view.batch_size
     ):
         raise ValueError("existing Beam context and workspace capacity are incompatible")
+    # V1 captures adapter-owned input/attention addresses. Keep one retired
+    # adapter per physical shape so alternating batch sizes do not invalidate
+    # and recapture those graphs. This cache grants no execution ownership:
+    # the active-owner and shared-resource checks above still run first.
+    # V2 already uses worker-owned fixed storage and needs no adapter cache.
+    adapter_cache = None
+    adapter_key = (view.batch_size, m.beam_params.beam_width)
+    if hooks_type is _StageExecutionHooks:
+        adapter_cache = getattr(worker, "_gr_gpu_stage_runners", None)
+        if adapter_cache is None:
+            adapter_cache = {}
+            worker._gr_gpu_stage_runners = adapter_cache
+        cached = adapter_cache.get(adapter_key)
+        if cached is not None:
+            if not cached.closed:
+                raise RuntimeError("Cached Beam adapter still owns an execution")
+            if cached.graph is not None and cached.backend is not backend:
+                raise ValueError(
+                    "Asynchronous scheduling captured constraint/model binding cannot change after startup"
+                )
+            existing = cached
     # The graph captures the adapter's fixed Forward and attention buffers,
     # not the request-local Beam state or its effective token budget.
     reuse_adapter = (
@@ -1087,5 +1108,7 @@ def get_stage_runner(
         binding.native_request_id: session for binding, session in zip(binding_tuple, session_tuple)
     }
     worker._gr_gpu_stage_runner = adapter
+    if adapter_cache is not None:
+        adapter_cache[adapter_key] = adapter
     adapter._validated_dispatch = (scheduler_output, stages)
     return cast(GPUBeamStageRunner, adapter)

@@ -250,6 +250,113 @@ def test_admission_accepts_full_attention(dtype):
     owner.release(owner.binding, consumer_done=done)
 
 
+def _shape_dispatch(size, generation, **params):
+    session_id = f"shape-{size}-{generation}"
+    m = replace(
+        metadata(),
+        session_id=session_id,
+        request_ids=tuple(f"{session_id}-{i}" for i in range(size)),
+        num_prompt_tokens=size * 7,
+        num_prompt_tokens_by_request=(7,) * size,
+        output_device_state=GRDeviceStateRef(session_id, 0),
+    )
+    if params:
+        m = replace(m, beam_params=msgspec.structs.replace(m.beam_params, **params))
+    result = dispatch(m)
+    result.num_scheduled_tokens = dict.fromkeys(m.request_ids, 7)
+    return result
+
+
+def _retire_shape(owner):
+    done = torch.Event()
+    done.record()
+    owner.release(owner.binding, consumer_done=done)
+
+
+def test_alternating_batch_shapes_preserve_captured_input_addresses():
+    worker = admission_worker()
+    worker._beam_decode_graph = Mock()
+    owners, graphs, outputs = {}, {}, {}
+    sizes = tuple(SUPPORTED_BEAM_BATCH_SIZES)
+    for generation, size in enumerate((*sizes, *reversed(sizes), *sizes)):
+        owner = get_stage_runner(worker, _shape_dispatch(size, generation))
+        assert worker._beam_context.registry.num_active_sessions == size
+        assert owner.beam.workspace.execution_owner is owner
+        if size not in owners:
+            owners[size] = owner
+            owner.input_ids.fill_(1)
+            # A real CUDA graph keeps these exact addresses alive across
+            # unrelated shapes; stale-address replay would return old values.
+            graphs[size] = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(graphs[size]):
+                outputs[size] = owner.input_ids * 2
+        else:
+            assert owner is owners[size]
+        owner.input_ids.fill_(generation + 1)
+        graphs[size].replay()
+        assert outputs[size].eq(2 * (generation + 1)).all()
+        _retire_shape(owner)
+        assert not worker._beam_context.registry.num_active_sessions
+        assert owner.beam.workspace.execution_owner is None
+    assert len(worker._gr_gpu_stage_runners) == len(sizes)
+    assert worker._beam_decode_graph.select.call_count == len(sizes)
+
+
+@pytest.mark.parametrize(
+    "params",
+    [{}, {"max_tokens": 2}, {"stop_token_ids": (1,)}],
+)
+def test_cached_shape_rebinds_state_after_other_width(params):
+    worker = admission_worker()
+    first = get_stage_runner(worker, _shape_dispatch(2, 0))
+    state = first.beam.state
+    address = first.input_ids.data_ptr()
+    _retire_shape(first)
+    other = get_stage_runner(worker, _shape_dispatch(1, 1))
+    _retire_shape(other)
+    again = get_stage_runner(worker, _shape_dispatch(2, 2, **params))
+    assert again is first
+    assert again.input_ids.data_ptr() == address
+    assert (again.beam.state is state) == (not params)
+    assert again.beam.state.max_new_tokens == params.get("max_tokens", 3)
+    assert again.beam.state.stop_token_ids_config == params.get("stop_token_ids", ())
+    assert again.beam.state.ignore_stop_tokens_config == params.get("ignore_stop_tokens", True)
+    assert again.beam.layout.request_ids == tuple(b.native_request_id for b in again.bindings)
+    assert again.beam.state.num_generated_tokens[:2].eq(0).all()
+    _retire_shape(again)
+
+
+def test_cached_shape_rejects_invalid_params_before_activation():
+    worker = admission_worker()
+    cached = get_stage_runner(worker, _shape_dispatch(2, 0))
+    _retire_shape(cached)
+    other = get_stage_runner(worker, _shape_dispatch(1, 1))
+    _retire_shape(other)
+    before = cached.beam.state.sequence.clone()
+    with pytest.raises(ValueError, match="requires ignore_eos=True"):
+        get_stage_runner(worker, _shape_dispatch(2, 2, ignore_stop_tokens=False))
+    assert cached.closed
+    assert worker._beam_context._gr_execution_owner is None
+    assert cached.beam.workspace.execution_owner is None
+    assert not worker._beam_context.registry.num_active_sessions
+    torch.testing.assert_close(cached.beam.state.sequence, before)
+    recovered = get_stage_runner(worker, _shape_dispatch(2, 3))
+    assert recovered is cached
+    _retire_shape(recovered)
+
+
+def test_cached_shape_cannot_displace_active_owner():
+    worker = admission_worker()
+    first = get_stage_runner(worker, _shape_dispatch(2, 0))
+    _retire_shape(first)
+    active = get_stage_runner(worker, _shape_dispatch(1, 1))
+    assert get_stage_runner(worker, _shape_dispatch(2, 2)) is active
+    assert worker._beam_context._gr_execution_owner is active
+    assert worker._beam_context.registry.num_active_sessions == 1
+    assert first.closed
+    _retire_shape(active)
+
+
 @pytest.mark.parametrize("windows", [(4, 4), (None, 4), (4, None), (None, 1)])
 def test_admission_rejects_sliding_window_before_resource_creation(windows, monkeypatch):
     from vllm_gr.v1.worker import model_runner_common
