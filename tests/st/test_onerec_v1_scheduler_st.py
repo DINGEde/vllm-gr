@@ -441,6 +441,33 @@ async def _run_online(work_dir: Path) -> None:
         )
 
 
+_COMPLETION_BATCH_PLANS = {(1, 2, 4): [4, 2, 1], (1, 4, 7): [7, 4]}
+
+
+def _completion_batch_plan(sizes: tuple[int, ...]) -> list[int]:
+    """How this test expects a policy to partition the 11-prompt list.
+
+    The expected plan depends on the policy, so an unlisted policy must fail
+    here. Defaulting to another policy's plan would assert the wrong sizes and
+    read as a passing test whenever the two sets of sizes happen to coincide.
+    """
+    try:
+        return _COMPLETION_BATCH_PLANS[sizes]
+    except KeyError:
+        pytest.fail(
+            f"VLLM_GR_TEST_ONLINE_BATCH_SIZES={list(sizes)} has no expected"
+            f" partition in this test; supported policies are"
+            f" {sorted(_COMPLETION_BATCH_PLANS)}"
+        )
+
+
+def test_an_unsupported_policy_fails_instead_of_asserting_another_plans() -> None:
+    assert _completion_batch_plan((1, 2, 4)) == [4, 2, 1]
+    assert _completion_batch_plan((1, 4, 7)) == [7, 4]
+    with pytest.raises(pytest.fail.Exception, match="no expected partition"):
+        _completion_batch_plan((1, 2, 4, 8))
+
+
 async def _run_online_completion_batch(work_dir: Path) -> None:
     """Check representative partitions through the real completions HTTP route.
 
@@ -473,7 +500,7 @@ async def _run_online_completion_batch(work_dir: Path) -> None:
     sizes = (1, 2, 4) if configured_sizes is None else tuple(json.loads(configured_sizes))
     if configured_sizes is not None:
         config["beam"]["online_batch_sizes"] = list(sizes)
-    expected_sizes = [4, 2, 1] if sizes == (1, 2, 4) else [7, 4]
+    expected_sizes = _completion_batch_plan(sizes)
     prompts = [
         tokenizer.encode(f"slot {i}", add_special_tokens=False) + newline * (i * 16) + source[-256:]
         for i in range(sum(expected_sizes))
@@ -542,7 +569,19 @@ async def _run_online_completion_batch(work_dir: Path) -> None:
             events = (await engine.collective_rpc("onerec_v1_st_events"))[0][before:]
             return [e for e in events if e["method"] == "execute"]
 
-        rows = []
+        rows: list[dict[str, Any]] = []
+        evidence = work_dir / "completion-batch-evidence.json"
+
+        def record(row: dict[str, Any]) -> None:
+            """Persist every row as it is produced, not once at the end.
+
+            An assertion that fails mid-run leaves the engine down and the
+            fixture gone, so this file is the only trace a CI reader gets.
+            Writing it only on success means a failure leaves nothing behind.
+            """
+            rows.append(row)
+            evidence.write_text(json.dumps(rows, indent=2))
+            print("completion-batch-evidence " + json.dumps(row))
 
         async def post(prompt_list: list[list[int]], **overrides: Any) -> dict[str, Any]:
             response = await client.post(
@@ -582,15 +621,26 @@ async def _run_online_completion_batch(work_dir: Path) -> None:
                 before = len((await engine.collective_rpc("onerec_v1_st_events"))[0])
                 data = await post(inputs)
                 count = len(inputs)
+                stages = await stages_since(before)
+                observed = [e["size"] for e in stages if e["stage"] == 0]
+                # Recorded before the assertions below, so the request that
+                # failed is in the evidence file whatever the assertion is.
+                record(
+                    dict(
+                        count=count,
+                        expected=expected,
+                        observed=observed,
+                        usage=data["usage"],
+                        choices=len(data.get("choices") or ()),
+                    )
+                )
                 assert len(data["choices"]) == count * _BEAM_WIDTH
                 assert [c["index"] for c in data["choices"]] == list(range(count * _BEAM_WIDTH))
                 assert data["usage"]["prompt_tokens"] == sum(map(len, inputs))
                 assert data["usage"]["completion_tokens"] == count * _BEAM_WIDTH * 5
-                stages = await stages_since(before)
-                assert [e["size"] for e in stages if e["stage"] == 0] == expected, stages
+                assert observed == expected, stages
                 assert len({e["session_id"] for e in stages}) == len(expected)
                 await assert_engine_is_clean()
-                rows.append(dict(count=count, sizes=expected, usage=data["usage"]))
                 return data
 
             assert await engine.reset_prefix_cache()
@@ -607,6 +657,7 @@ async def _run_online_completion_batch(work_dir: Path) -> None:
 
             if sizes == (1, 2, 4):
                 assert await engine.reset_prefix_cache()
+                record(dict(note="ASGI disconnect probe: starting"))
                 before = len((await engine.collective_rpc("onerec_v1_st_events"))[0])
                 disconnected = asyncio.Event()
                 handler_finished = asyncio.Event()
@@ -663,7 +714,7 @@ async def _run_online_completion_batch(work_dir: Path) -> None:
                 finally:
                     serving.create_completion = original_create
                 await wait_for_the_engine_to_settle()
-                rows.append(dict(note="ASGI disconnect after engine execution began"))
+                record(dict(note="ASGI disconnect after engine execution began"))
                 # Mixed-width list lengths, not only the 1/2/4/8 shapes:
                 # the default policy partitions 6 as 4 + 2 and 3 as 2 + 1.
                 for count, expected in ((6, [4, 2]), (3, [2, 1]), (2, [2])):
@@ -678,14 +729,13 @@ async def _run_online_completion_batch(work_dir: Path) -> None:
             if not _EAGER:
                 assert any(e["method"] == "replay" for e in events), "no Decode replay"
                 assert any(e.get("outcome") == "replay" for e in events), events
-            rows.append(
+            record(
                 dict(
                     startup_seconds=startup_seconds,
                     request_seconds=time.monotonic() - requests_started,
                     prefill_buckets=buckets,
                 )
             )
-        (work_dir / "completion-batch-evidence.json").write_text(json.dumps(rows, indent=2))
 
 
 @pytest.mark.slow
