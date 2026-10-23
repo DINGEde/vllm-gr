@@ -112,6 +112,18 @@ The Prefill-only environment override remains independent; V1 Decode and NPU
 exact Decode graph settings retain their existing semantics. Persistent
 workspace capacity is independent of this policy. Enabling a size does not
 guarantee graph replay for every shape. See [capture configuration](prefill_graph_capture.md).
+
+Every width the service actually uses keeps its own Decode graph, Prefill
+captures and adapter buffers for the worker's lifetime, so a wider policy costs
+memory, not only startup time. Measured on one L20 with
+`online_batch_sizes: [1, 2, 3, 4, 5, 6, 7, 8]` and `--max-num-seqs 8`, using each
+width once in turn: 52 to 176 MiB per additional width -- the buffers scale with
+the width -- and 772 MiB in total for all eight. The startup width is already
+captured and costs nothing extra, so the default `[1, 2, 4]` pays for two widths,
+about 120 MiB. Everything is released when the worker exits. Sizes the service
+never runs are never captured, so a policy is only as expensive as the widths the
+traffic actually produces.
+
 Verify actual execution mode,
 warmup cost, memory use and end-to-end latency before selecting a deployment
 policy, and measure the list lengths your traffic actually sends. Largest-first
