@@ -114,39 +114,44 @@ workspace capacity is independent of this policy. Enabling a size does not
 guarantee graph replay for every shape. See [capture configuration](prefill_graph_capture.md).
 Verify actual execution mode,
 warmup cost, memory use and end-to-end latency before selecting a deployment
-policy. Largest-first packing is not a throughput-optimal search, and it is not
-uniformly faster than sending the same prompts as separate requests. Measured on
-one L20 with `--max-num-seqs 8`, Prefix Cache off, beam width 128 and 1024-token
-prompts, each k-prompt list against the same k prompts sent one at a time, under
-the default `[1, 2, 4]` policy:
+policy, and measure the list lengths your traffic actually sends. Largest-first
+packing is not a throughput-optimal search. Measured on one L20 with
+`--max-num-seqs 8`, Prefix Cache off, beam width 128 and 1024-token prompts, each
+k-prompt list against the same k prompts sent one at a time, under the default
+`[1, 2, 4]` policy:
 
 | k | Plan | List (ms) | Separate (ms) | Ratio |
 | ---: | --- | ---: | ---: | ---: |
-| 2 | 2 | 109.6 | 131.7 | 1.20 |
-| 4 | 4 | 210.5 | 265.6 | 1.26 |
-| 8 | 4 + 4 | 421.0 | 531.7 | 1.26 |
-| 3 | 2 + 1 | 463.3 | 197.2 | 0.42 |
-| 6 | 4 + 2 | 580.9 | 397.7 | 0.67 |
-| 7 | 4 + 2 + 1 | 786.8 | 464.9 | 0.59 |
+| 1 | 1 | 65.7 | 66.5 | 1.00 |
+| 2 | 2 | 111.6 | 132.5 | 1.19 |
+| 3 | 2 + 1 | 175.1 | 199.9 | 1.14 |
+| 6 | 4 + 2 | 320.7 | 399.5 | 1.25 |
+| 7 | 4 + 2 + 1 | 384.4 | 465.4 | 1.21 |
+| 8 | 4 + 4 | 422.7 | 534.8 | 1.27 |
 
-Plans that use one width were 1.2 to 1.3 times faster; plans that mix widths
-were up to 2.4 times slower. The extra cost is in the mixing, not in the number
-of sub-batches: under `[1, 4, 7]`, a `7 + 7` plan cost 704.6 ms against 357.1 ms
-for a single 7 -- twice the width, twice the time, no penalty -- while `7 + 1`
-and `7 + 4` were slower than the same prompts sent separately (683.4 ms against
-528.7 ms, and 803.2 ms against 727.1 ms). The Prefill capture grid is not the
-cause: naming `VLLM_GR_PREFILL_GRAPH_CAPTURE_NUM_REQS=1,2,4` explicitly left the
-mixed plans at the same speed. Beyond that the cost is not localized here, so
-measure the list lengths your traffic actually sends rather than assuming a
-wider policy is a faster one.
+k = 1 delegates to the upstream handler, so its true ratio is exactly 1 and the
+measured 1.00 is this table's noise floor. Every other row is a real gain:
+packing a list beats sending its prompts separately whether its plan uses one
+width or several, and a plan that mixes widths is not slower for doing so.
+
+That was not always true, and the difference is worth knowing when reading older
+measurements. An earlier revision of this backend charged plans whose sub-batches
+had different widths 0.42 to 0.67 times the separate cost (the k = 3, 6 and 7
+rows above), and under `[1, 4, 7]` a `7 + 1` or `7 + 4` plan was slower than the
+same prompts sent separately while `7 + 7` cost exactly twice a single 7. The
+cause was the V1 adapter lifecycle: entering a new width built a new adapter and
+discarded the Decode capture belonging to that width, so the next Decode
+recaptured it, and warming a width once never lasted. The Prefill capture grid
+was ruled out separately. One retired adapter per batch size is retained now, so
+the rows above are the current behaviour.
 
 Changing the policy can also change numerical outputs, because the execution
 shape changes. At temperature 0, on 128 video-task prompts, a 4-input batch and
 the same prompts sent one at a time agreed on the top-ranked candidate for 110
 of them (85.9%), with a mean top-32 overlap of 29.8 of 32. Two runs of the
 single-prompt arm agreed on all 128, so the disagreement comes from the batch
-shape rather than from run-to-run variance. A policy that batches by default therefore returns
-answers that a per-input `[1]` deployment does not.
+shape rather than from run-to-run variance. A policy that batches by default
+therefore returns answers that a per-input `[1]` deployment does not.
 
 A k-input request runs its sub-batches serially, but it does not hold the engine
 between them: requests from other clients are admitted in the gaps. A k-input

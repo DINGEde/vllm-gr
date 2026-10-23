@@ -186,13 +186,11 @@ These settings take effect at startup, not per HTTP request. Wider capture
 sets increase startup cost and graph memory. Persistent workspace capacity
 still covers the engine's 1..8 capability and remains independent of the policy.
 
-A wider policy is not automatically faster. Measured against the same prompts
-sent as separate requests, lists whose plan uses a single size were 1.2 to 1.3
-times faster, and lists whose plan mixes sizes up to 2.4 times slower -- 6
-prompts plan as `4 + 2`, 7 as `4 + 2 + 1`, and both were slower than sending
-those prompts on their own. Measure the list lengths your own traffic sends
-before choosing a policy; the numbers are in
-[Online batch policy](online_batch_policy.md#performance-boundary).
+Packing a list beats sending the same prompts as separate requests, but how much
+depends on the plan: about 1.2 to 1.3 times for lists that plan to a single
+sub-batch size, and about 1.1 to 1.25 times when the plan mixes sizes. Measure
+the list lengths your own traffic sends before choosing a policy; the numbers
+are in [Online batch policy](online_batch_policy.md#performance-boundary).
 
 A single prompt is one session either way and keeps the plain route. The list is
 never reordered: the batches are contiguous and are submitted one at a time, so
