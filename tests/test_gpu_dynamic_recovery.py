@@ -30,6 +30,28 @@ def test_dynamic_route_depends_only_on_search_geometry(widths, expected):
     )
 
 
+def test_discard_dynamic_graphs_drops_runtime_capture_refusals():
+    """A discarded graph takes its refusal record with it.
+
+    ``discard_dynamic_graphs`` clears every captured graph because the adapter's
+    forward buffers are replaced.  A refusal recorded against those buffers
+    describes a graph that no longer exists, so keeping it would veto the
+    replacement this session is about to capture.
+    """
+    from vllm_gr.v1.worker.gpu_dynamic_beam import discard_dynamic_graphs
+
+    graph = Mock()
+    worker = SimpleNamespace(
+        _beam_decode_graph=graph,
+        _gr_runtime_decode_capture_failures={(1, 4): "capture refused"},
+    )
+    context = SimpleNamespace(registry=SimpleNamespace(num_active_sessions=0))
+    discard_dynamic_graphs(worker, context)
+    graph.clear.assert_called_once()
+    assert worker._gr_dynamic_graphs_discarded
+    assert not hasattr(worker, "_gr_runtime_decode_capture_failures")
+
+
 def test_dynamic_owner_released_while_gc_frozen():
     # A separate process keeps the suite's pre-existing frozen generation intact.
     subprocess.run(
