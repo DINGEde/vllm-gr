@@ -136,7 +136,8 @@ constraint_table:
 | --- | --- |
 | `enabled` | Must be `true` for V1 |
 | `backend` | `cuda` or `npu`, matching the device |
-| `max_top_k` | Candidate capacity; use the configured Beam width |
+| `max_top_k` | Candidate capacity; must be at least the candidate width |
+| `candidate_width` | Candidates per Beam row (1..256); omit to follow the Beam width. Required when the Beam width exceeds 256 |
 | `path` | Constraint Table `.safetensors` artifact |
 | `format` | Must be `constraint_table_v1` |
 | `artifact_digest` | Digest printed by `build_constraint_table.py` |
@@ -156,7 +157,7 @@ legacy `vllm_gr_*` keys in `additional_config`.
 | `max_model_len` | Must cover the prompt plus effective generation budget |
 | `max_num_batched_tokens` | Must cover the prompt when chunked Prefill is disabled |
 | `max_num_seqs` | The example sets it to the fixed Beam width |
-| `max_logprobs` | Must be large enough for the configured Beam width |
+| `max_logprobs` | Must be at least the candidate width (`candidate_width`) |
 | `enforce_eager` | `false` allows graph execution |
 
 ### Request parameters

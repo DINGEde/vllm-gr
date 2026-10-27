@@ -219,9 +219,9 @@ def add_cli_args(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
         help=(
             "Upper bound on beam width for the persistent beam KV pool and "
             "the captured CUDA graph shape (num_tokens=width). Must be >= "
-            "any served request's beam_width and <= 256. The operator ceiling is "
-            "higher, but configuration still samples one candidate per beam row "
-            "(K == W) and caps K at 256, so a served width cannot exceed it. "
+            "any served request's beam_width and <= 1024. Widths above 256 need an "
+            "explicit constraint_table.candidate_width, because K follows the Beam "
+            "width when it is unset and the operators cap K at 256. "
             "When set, the engine allocates "
             "the beam KV pool and (unless --no-beam-graph) captures a FULL "
             "CUDA graph for this width at startup. Unset (default) disables "

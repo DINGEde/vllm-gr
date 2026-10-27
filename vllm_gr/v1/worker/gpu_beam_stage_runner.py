@@ -19,6 +19,7 @@ import torch
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.outputs import AsyncModelRunnerOutput, ModelRunnerOutput
 
+from vllm_gr.config import resolve_candidate_width
 from vllm_gr.constraints.backend import ConstraintMetadata
 from vllm_gr.constraints.cuda_backend import CUDAConstraintBackend
 from vllm_gr.ops.cuda.unconstrained_topk import (
@@ -533,11 +534,14 @@ class GPUBeamStageRunner:
         self.hooks.initialize_inputs(self, rows)
         self.constraint_steps = beam.state.num_generated_tokens[:batch_size]
         w = beam.workspace
+        # Candidate geometry is (rows, K): the row count is the beam width and
+        # the column count is the independent candidate width.
+        candidate_width = w.key.top_k
         self.prefixes = w.prefix_token_ids[:batch_size].reshape(rows, -1)
         self.temperatures = w.temperatures[:batch_size].reshape(rows)
-        self.tokens = w.topk_token_ids[:batch_size].reshape(rows, beam.state.beam_width)
-        self.scores = w.topk_scores[:batch_size].reshape(rows, beam.state.beam_width)
-        self.valid = w.topk_valid_mask[:batch_size].reshape(rows, beam.state.beam_width)
+        self.tokens = w.topk_token_ids[:batch_size].reshape(rows, candidate_width)
+        self.scores = w.topk_scores[:batch_size].reshape(rows, candidate_width)
+        self.valid = w.topk_valid_mask[:batch_size].reshape(rows, candidate_width)
         self.counts = w.topk_valid_counts[:batch_size].reshape(rows)
         context._gr_execution_owner = self
         beam.workspace.execution_owner = self
@@ -773,11 +777,35 @@ class GPUBeamStageRunner:
                     raise RuntimeError("GR output stage has no native model logits")
                 layout = BeamBatchExecutionView.from_stage_metadata(m)
                 rows = layout.batch_size if m.kind is GRStageKind.PREFILL else entry.row_count
+                candidate_width = layout.candidate_top_k
                 candidates = (
-                    self.dynamic.candidate_buffers(rows, layout.candidate_top_k)
+                    self.dynamic.candidate_buffers(rows, candidate_width)
                     if self.dynamic is not None
                     else (self.tokens[:rows], self.scores[:rows], self.valid[:rows])
                 )
+                # The backend's unchecked entry point validates nothing: it
+                # addresses outputs as ``row * K + offset`` and skips shape
+                # checks.  A candidate buffer whose column count disagrees with
+                # the requested K would write past its allocation (K < rows of
+                # the view) or leave candidate columns unwritten (K larger).
+                # Check the geometry here, before the launch.
+                expected = (rows, candidate_width)
+                for name, tensor, dtype in (
+                    ("candidate token ids", candidates[0], torch.int32),
+                    ("candidate logprobs", candidates[1], torch.float32),
+                    ("candidate valid mask", candidates[2], torch.bool),
+                ):
+                    if (
+                        tuple(tensor.shape) != expected
+                        or tensor.dtype != dtype
+                        or tensor.device != self.logits.device
+                        or not tensor.is_contiguous()
+                    ):
+                        raise RuntimeError(
+                            f"GR candidate {name} must be contiguous {dtype} "
+                            f"{expected} on {self.logits.device}, got "
+                            f"{tuple(tensor.shape)} {tensor.dtype} {tensor.device}"
+                        )
                 if self.backend is not None:
                     self.backend.select_out_unchecked(
                         self.logits,
@@ -1080,7 +1108,9 @@ def get_stage_runner(
         or any(table.device != worker.device for table in backend._tables())
     ):
         raise ValueError("constraint backend is not ready or its model/device binding differs")
-    required_top_k = max(m.beam_params.per_parent_beam_widths or (cfg.beam_max_width,))
+    candidate_width = resolve_candidate_width(cfg)
+    # A request-level per-stage K schedule overrides the configured scalar K.
+    required_top_k = max(m.beam_params.per_parent_beam_widths or (candidate_width,))
     if backend is not None and (
         backend.info.max_rows
         < hooks_type.required_constraint_rows(len(m.request_ids), cfg.beam_max_width)
@@ -1130,9 +1160,7 @@ def get_stage_runner(
     if getattr(worker, "_beam_sessions", {}):
         raise ValueError("another Beam session owns the Worker")
     workspace = worker._beam_postprocess_workspaces.require(
-        BeamPostprocessWorkspaceKey(
-            cfg.beam_max_width, cfg.beam_max_width, worker.model_config.dtype
-        )
+        BeamPostprocessWorkspaceKey(cfg.beam_max_width, candidate_width, worker.model_config.dtype)
     )
     view = BeamBatchExecutionView.from_stage_metadata(m)
     context = getattr(worker, "_beam_context", None)
@@ -1198,6 +1226,7 @@ def get_stage_runner(
         and existing.beam.state.max_new_tokens == m.beam_params.max_tokens
         and existing.beam.state.stop_token_ids_config == m.beam_params.stop_token_ids
         and existing.beam.state.ignore_stop_tokens_config == m.beam_params.ignore_stop_tokens
+        and existing.beam.state.candidate_width == candidate_width
     )
     if reuse_beam:
         assert existing is not None
@@ -1210,6 +1239,11 @@ def get_stage_runner(
             max_new_tokens=m.beam_params.max_tokens,
             stop_token_ids=m.beam_params.stop_token_ids,
             ignore_stop_tokens=m.beam_params.ignore_stop_tokens,
+            # Completed-result storage is sized from the engine's K (W when K
+            # is unset): the widest candidate row any stage can produce.  With
+            # K unset the view's ``candidate_top_k`` is only this stage's output
+            # width, which would undersize a schedule that widens later.
+            candidate_width=candidate_width,
         )
     if not reuse_adapter and (existing_dynamic is not None or dynamic_requested):
         discard_dynamic_graphs(worker, context)

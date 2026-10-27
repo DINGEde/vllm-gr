@@ -55,6 +55,11 @@ def parse_args() -> argparse.Namespace:
         type=int,
         help="NPU final sequence count; defaults to the last stage width",
     )
+    parser.add_argument(
+        "--candidate-width",
+        type=int,
+        help="Candidates per beam row (1..256); defaults to --beam-width",
+    )
     parser.add_argument("--batch-size", type=int, default=1)
     parser.add_argument("--length-penalty", type=float, default=1.0)
     parser.add_argument("--max-model-len", type=int, default=8192)
@@ -306,6 +311,9 @@ def run(args: argparse.Namespace, artifact_path: Path) -> None:
     from vllm_gr.sampling_params import BeamSearchParams
 
     is_npu = args.constraint_backend == "npu"
+    # Candidate width K is the per-row top-k; None means it follows the beam
+    # width (the pre-decoupling behaviour).
+    candidate_width = args.candidate_width if args.candidate_width is not None else args.beam_width
 
     artifact_digest, tokenizer_digest = build_artifact(
         args.model.resolve(),
@@ -327,7 +335,7 @@ def run(args: argparse.Namespace, artifact_path: Path) -> None:
         "constraint_table": {
             "enabled": True,
             "backend": args.constraint_backend,
-            "max_top_k": args.beam_width,
+            "max_top_k": candidate_width,
             "path": str(artifact_path),
             "format": "constraint_table_v1",
             "artifact_digest": artifact_digest,
@@ -338,6 +346,9 @@ def run(args: argparse.Namespace, artifact_path: Path) -> None:
     result_width = getattr(args, "result_width", None)
     if dynamic_widths is not None and len(dynamic_widths) > 1:
         beam_config["graph_widths"] = sorted(set(dynamic_widths[:-1]))
+    if args.candidate_width is not None:
+        # Omitted means K == beam_width; state it explicitly when decoupled.
+        vllm_gr_config["constraint_table"]["candidate_width"] = args.candidate_width
     params = BeamSearchParams(
         beam_width=args.beam_width,
         dynamic_beam_widths=dynamic_widths,
@@ -364,7 +375,7 @@ def run(args: argparse.Namespace, artifact_path: Path) -> None:
         # B-wide Prefill schedules B * (input_len + 1) tokens, not B * input_len.
         max_num_batched_tokens=max(args.max_model_len, args.batch_size * (args.input_len + 1)),
         max_num_seqs=max(args.beam_width, args.batch_size),
-        max_logprobs=args.beam_width,
+        max_logprobs=candidate_width,
         gpu_memory_utilization=args.gpu_memory_utilization,
         enforce_eager=is_npu and args.execution == "eager",
         **profiler_engine_kwargs(args),
