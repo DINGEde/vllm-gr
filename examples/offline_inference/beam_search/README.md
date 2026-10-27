@@ -502,6 +502,59 @@ latency divided by B is only amortized cost, not individual request latency.
 NPU graph counters saved in the report include both warmup and measured runs;
 check the captured shape and `fallbacks` when comparing graph performance.
 
+### Measure AB-parity latency on the OneRec dataset
+
+`--dataset-dir` replaces the single prompt with real OneRec rows and measures
+them the way the AB harness does: one prompt group per call, a
+`reset_prefix_cache()` before every group, and a second identical call right
+after it. The first call of each pair is a cold Prefill miss, the second is a
+warm cache hit, so the report carries both distributions.
+
+```bash
+export PYTHONPATH="$PWD${PYTHONPATH:+:$PYTHONPATH}"
+python -u examples/offline_inference/beam_search/offline_beam_search_v1.py \
+  --model /path/to/OneRec-1.7B \
+  --catalog tools/AB_Tests/constraints/video_constraint_triples.json \
+  --dataset-dir /path/to/onerec-data \
+  --task video \
+  --beam-width 128 --input-len 1024 --generated-steps 3 \
+  --num-prompts 100 --warmup-requests 4 \
+  --output-json /tmp/ab_parity.json 2>&1 | tee /tmp/ab_parity.log
+```
+
+`--dataset-dir` must point at a dataset root laid out for
+`benchmarks.open_one_rec.open_one_rec_dataset` (a `<task>/` directory of
+parquet shards). It cannot be combined with `--prompt`, `--repeat`,
+`--profile-dir`, `--cot`, or `--enable-thinking`.
+
+This mode also pins the engine to the frozen AB values, so the numbers are
+comparable with the AB reports and the dashboard trend:
+
+| Knob | Value | Why |
+| --- | --- | --- |
+| `max_model_len` | 40960 | Same context budget as the AB harness |
+| `max_num_seqs` | `--batch-size` | A larger quota changes the Prefill capture set, adding a second variable |
+| `seed` | 0 | Both harnesses see the same rows in the same order |
+| `VLLM_GR_PREFILL_GRAPH_KV_BOUND` | 4096 | Without it, every cache hit silently falls back to eager Prefill and costs ~20 ms more |
+| `VLLM_ENABLE_V1_MULTIPROCESSING` | 0 | A spawned EngineCore adds ~3.5 ms of IPC to every request |
+
+Each value can still be overridden explicitly; the report records what was
+actually used.
+
+Two timings are reported per cache state, because the two official V1
+benchmarks disagree about where the window ends:
+
+| Field | Window | Use |
+| --- | --- | --- |
+| `batch_latency_ms` | `beam_search_v1()` only | Pure API cost |
+| `e2e_ms` | `beam_search_v1()` + `torch.accelerator.synchronize()` | The AB harness boundary |
+
+Beam `text`/`tokens` materialization happens after both timers stop, but it is
+always forced, so the lazy work cannot leak into the next request's window. It
+costs roughly 5 ms per 128-beam request, which is why the two boundaries are not
+interchangeable: state which one a number came from. `timing_scope` in the JSON
+spells it out.
+
 ### Per-stage Beam widths through the Python API
 
 CUDA and NPU V1 support a retained Beam width for each generated token, plus a

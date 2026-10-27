@@ -199,6 +199,10 @@ git clone https://huggingface.co/datasets/OpenOneRec/OpenOneRec-RecIF ./data
 cd -
 ```
 
+The `offline_beam_search_v1.py` example can consume this clone directly through
+`--dataset-dir`; see
+[Measure AB-parity latency on the OneRec dataset](../../examples/offline_inference/beam_search/README.md#measure-ab-parity-latency-on-the-onerec-dataset).
+
 ### Data Structure
 
 OneRec expects data in **Parquet format** with the following schema:

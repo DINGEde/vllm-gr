@@ -8,6 +8,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import sys
 import tempfile
 from pathlib import Path
 from statistics import mean
@@ -21,6 +22,18 @@ os.environ.setdefault("USE_TF", "0")
 
 BEGIN_TOKEN = "<|sid_begin|>"
 END_TOKEN = "<|sid_end|>"
+
+# tools/AB_Tests/run_v1_offline_benchmark.py pins the same values; see engine_knobs.
+AB_PREFILL_GRAPH_KV_BOUND = "4096"
+AB_MAX_MODEL_LEN = 40960
+
+DEFAULT_MAX_MODEL_LEN = 8192
+
+TIMING_SCOPE = (
+    "batch_latency_ms is the beam_search_v1 call up to the output objects returning; e2e_ms is "
+    "that call plus the device synchronization that retires its GPU work. Both exclude engine startup, warmup, pre-call prompt preparation and "
+    "post-call beam materialization/printing, which is forced once the timers stop"
+)
 
 
 def parse_args() -> argparse.Namespace:
@@ -37,7 +50,46 @@ def parse_args() -> argparse.Namespace:
         default="cuda",
         help="Constraint Table device backend (CUDA or NPU)",
     )
-    parser.add_argument("--prompt", type=Path, required=True)
+    parser.add_argument(
+        "--prompt", type=Path, help="Prompt text file (single-prompt benchmark mode)"
+    )
+    parser.add_argument(
+        "--dataset-dir",
+        type=Path,
+        help="AB-parity mode: OneRec dataset root; runs one prompt per measured call with a "
+        "prefix-cache reset before each, matching tools/AB_Tests/run_v1_offline_benchmark.py",
+    )
+    parser.add_argument(
+        "--task",
+        default="video",
+        help="OneRec task type for --dataset-dir (default: video, the AB canonical task)",
+    )
+    parser.add_argument(
+        "--num-prompts",
+        type=int,
+        default=100,
+        help="Measured prompts in --dataset-dir mode (default: 100, the AB canonical count)",
+    )
+    parser.add_argument(
+        "--warmup-requests",
+        type=int,
+        default=10,
+        help="Untimed prompts in --dataset-dir mode (default: 10, the AB canonical count)",
+    )
+    parser.add_argument(
+        "--enable-multiprocessing",
+        action="store_true",
+        help="Enable multi-process EngineCore, overriding VLLM_ENABLE_V1_MULTIPROCESSING. "
+        "Without this flag, respect the environment; otherwise default to single process "
+        "on CUDA and the vLLM multi-process default on NPU",
+    )
+    parser.add_argument(
+        "--enable-short-suffix-attention",
+        action="store_true",
+        help="Opt into fused short-suffix attention on compatible CUDA models using "
+        "FlashAttention 2. Disabled by default so FA3 and other configurations remain usable; "
+        "unsupported opt-in configurations are rejected by the engine",
+    )
     parser.add_argument(
         "--enable-thinking",
         action="store_true",
@@ -66,7 +118,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--temperature", type=float, default=0.6, help="Thinking mode sampling")
     parser.add_argument("--top-p", type=float, default=0.95, help="Thinking mode sampling")
     parser.add_argument("--top-k", type=int, default=20, help="Thinking mode sampling")
-    parser.add_argument("--seed", type=int, default=0, help="Thinking mode random seed")
     parser.add_argument(
         "--execution",
         choices=("eager", "graph"),
@@ -91,8 +142,25 @@ def parse_args() -> argparse.Namespace:
         help="Candidates per beam row (1..256); defaults to --beam-width",
     )
     parser.add_argument("--batch-size", type=int, default=1)
+    parser.add_argument(
+        "--max-num-seqs",
+        type=int,
+        help="Engine concurrency quota. Defaults to --batch-size in --dataset-dir mode (the AB "
+        "harness value) and to max(beam-width, batch-size) otherwise",
+    )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=0,
+        help="Engine seed, also used by --cot and --enable-thinking. 0 is the AB harness value",
+    )
     parser.add_argument("--length-penalty", type=float, default=1.0)
-    parser.add_argument("--max-model-len", type=int, default=8192)
+    parser.add_argument(
+        "--max-model-len",
+        type=int,
+        help="Engine context limit, which also sets the batch-token budget. Defaults to 40960 in "
+        "--dataset-dir mode (the AB harness value) and to 8192 otherwise",
+    )
     parser.add_argument("--gpu-memory-utilization", type=float, default=0.5)
     parser.add_argument("--print-beams", type=int, default=5)
     parser.add_argument("--repeat", type=int, help="Benchmark this many batches without a profiler")
@@ -102,7 +170,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--output-json",
         type=Path,
-        help="Save Beam benchmark (--repeat required), or thinking output and timings",
+        help="Save the Beam benchmark summary and per-run timings (requires --repeat or "
+        "--dataset-dir), or thinking output and timings",
     )
     parser.add_argument(
         "--profile-dir",
@@ -122,6 +191,12 @@ def parse_args() -> argparse.Namespace:
         help="Complete batches to profile; print only the last result (requires --profile-dir)",
     )
     args = parser.parse_args()
+    # Resolve before any validation reads it: --max-model-len is optional and its
+    # default depends on the mode, but every check below compares it as an int.
+    if args.max_model_len is None:
+        args.max_model_len = (
+            AB_MAX_MODEL_LEN if args.dataset_dir is not None else DEFAULT_MAX_MODEL_LEN
+        )
     if args.cot and args.enable_thinking:
         parser.error("--cot and --enable-thinking are separate modes; choose one")
     if args.cot and args.cot_max_tokens <= 0:
@@ -139,6 +214,8 @@ def parse_args() -> argparse.Namespace:
             parser.error("--temperature must be in [0, 2] and --top-p in (0, 1]")
         if args.top_k < -1:
             parser.error("--top-k must be -1, 0, or positive")
+    if args.enable_short_suffix_attention and args.constraint_backend != "cuda":
+        parser.error("--enable-short-suffix-attention requires the CUDA backend")
     if args.dynamic_beam_widths is not None:
         try:
             widths = [int(value.strip()) for value in args.dynamic_beam_widths.split(",")]
@@ -169,13 +246,78 @@ def parse_args() -> argparse.Namespace:
         parser.error(
             "--repeat cannot be combined with --profile-dir; profile overhead affects latency"
         )
+    if (args.prompt is None) == (args.dataset_dir is None):
+        parser.error("exactly one of --prompt or --dataset-dir is required")
+    if args.prompt is None and args.repeat is not None:
+        parser.error(
+            "--repeat re-runs one prompt; --dataset-dir measures one prompt per call instead"
+        )
+    if args.dataset_dir is not None:
+        if args.profile_dir is not None:
+            parser.error("--dataset-dir cannot be combined with --profile-dir")
+        if args.cot or args.enable_thinking:
+            parser.error("--dataset-dir cannot be combined with --cot or --enable-thinking")
+        if args.num_prompts <= 0 or args.warmup_requests < 0:
+            parser.error("--num-prompts must be positive and --warmup-requests nonnegative")
+        if args.num_prompts % args.batch_size:
+            parser.error(
+                f"--num-prompts ({args.num_prompts}) must be a multiple of "
+                f"--batch-size ({args.batch_size})"
+            )
     if (
         args.output_json is not None
         and args.repeat is None
+        and args.dataset_dir is None
         and not (args.enable_thinking or args.cot)
     ):
-        parser.error("--output-json requires --repeat")
+        parser.error("--output-json requires --repeat or --dataset-dir")
     return args
+
+
+def effective_multiprocessing(args: argparse.Namespace) -> bool:
+    """Read the effective value using the same integer conversion as vLLM."""
+    default = "0" if args.constraint_backend == "cuda" else "1"
+    return bool(int(os.environ.get("VLLM_ENABLE_V1_MULTIPROCESSING", default)))
+
+
+def configure_multiprocessing(args: argparse.Namespace) -> None:
+    """Resolve CLI > environment > backend default before importing vLLM."""
+    name = "VLLM_ENABLE_V1_MULTIPROCESSING"
+    if args.enable_multiprocessing:
+        os.environ[name] = "1"
+    else:
+        os.environ.setdefault(name, "0" if args.constraint_backend == "cuda" else "1")
+    effective_multiprocessing(args)  # Validate before engine startup.
+
+
+def engine_knobs(args: argparse.Namespace) -> dict[str, Any]:
+    """Engine knobs shared by the run and the benchmark report.
+
+    --dataset-dir compares against the AB harness, so it takes that harness's
+    values unless they are given explicitly: max_num_seqs=batch_size, seed=0 and
+    the Prefill graph KV bound. The default max_num_seqs is deliberately larger
+    than the batch, which changes the Prefill graph capture set and would be a
+    second variable.
+
+    ``VLLM_GR_PREFILL_GRAPH_KV_BOUND`` has to be an environment variable: the
+    worker reads it once per process at graph-capture time, so it cannot travel
+    through the engine kwargs. Left unset, the captured bound covers only the
+    scheduler's own bucket, and every cache-hit Prefill -- whose KV length is the
+    whole context even though only the uncached tail is scheduled -- silently
+    falls back to eager. Measured on the canonical bw128-in1024 cell that costs
+    the hit arm ~23 ms, i.e. 80% of its e2e_ms. The AB harness pins 4096 for the
+    same reason; over-sizing is free because the replay gate is an upper bound.
+    """
+    if args.max_num_seqs is not None:
+        max_num_seqs = args.max_num_seqs
+    elif args.dataset_dir is not None:
+        max_num_seqs = args.batch_size
+    else:
+        max_num_seqs = max(args.beam_width, args.batch_size)
+    knobs: dict[str, Any] = {"max_num_seqs": max_num_seqs, "seed": args.seed}
+    if args.dataset_dir is not None:
+        os.environ.setdefault("VLLM_GR_PREFILL_GRAPH_KV_BOUND", AB_PREFILL_GRAPH_KV_BOUND)
+    return knobs
 
 
 def profiler_engine_kwargs(args: argparse.Namespace) -> dict[str, Any]:
@@ -302,6 +444,81 @@ def execute_beam_batch(
     return outputs
 
 
+def synchronize_device(args: argparse.Namespace) -> None:
+    """Retire queued device work around a timed call on the CUDA backend.
+
+    The AB harness boundary is ``beam_search_v1()`` plus the device
+    synchronization that retires its GPU work (PR #415's ``call+sync`` window).
+    The NPU backends this example also serves drive their own streams, so they
+    keep the call-only window and their ``e2e_ms`` equals ``call_ms``.
+    """
+    if args.constraint_backend != "cuda":
+        return
+    import torch
+
+    torch.accelerator.synchronize()
+
+
+def materialize_outputs(outputs: list[Any]) -> int:
+    """Force lazy token/text building outside the timed window; return the beam count.
+
+    The V1 pipeline builds tokens and text lazily, so leaving them unread would
+    defer that work into the next call's window instead of removing it.
+    """
+    returned = 0
+    for output in outputs:
+        for sequence in output.sequences:
+            _ = sequence.text
+            _ = sequence.tokens
+        returned += len(output.sequences)
+    return returned
+
+
+def timed_call(
+    llm: Any, args: argparse.Namespace, prompts: list[Any], params: Any
+) -> tuple[list[Any], float, float, int]:
+    """Run one call, timing it under both boundaries.
+
+    ``call_ms`` is the boundary this example has always reported: the call alone.
+    ``e2e_ms`` additionally covers the device synchronization that retires the
+    call's GPU work -- the AB harness boundary. Materialization happens after both
+    timers stop; callers must not inspect the returned outputs before that.
+
+    ``execute_beam_batch`` is used rather than a bare ``beam_search_v1`` call so
+    the ``--cot`` mode keeps working; its thinking/beam split is recorded
+    separately in ``args.cot_last_report``.
+    """
+    synchronize_device(args)
+    started = perf_counter()
+    outputs = execute_beam_batch(llm, args, prompts, params)
+    call_ms = (perf_counter() - started) * 1000.0
+    synchronize_device(args)
+    e2e_ms = (perf_counter() - started) * 1000.0
+    if len(outputs) != len(prompts):
+        raise RuntimeError(f"expected {len(prompts)} request outputs, got {len(outputs)}")
+    return outputs, call_ms, e2e_ms, materialize_outputs(outputs)
+
+
+def percentile(ordered: list[float], fraction: float) -> float:
+    position = (len(ordered) - 1) * fraction
+    lower = int(position)
+    upper = min(lower + 1, len(ordered) - 1)
+    return ordered[lower] + (ordered[upper] - ordered[lower]) * (position - lower)
+
+
+def distribution(samples_ms: list[float]) -> dict[str, float]:
+    if not samples_ms:
+        raise ValueError("cannot summarize an empty sample")
+    ordered = sorted(samples_ms)
+    return {
+        "mean": mean(ordered),
+        "p50": percentile(ordered, 0.50),
+        "p95": percentile(ordered, 0.95),
+        "min": ordered[0],
+        "max": ordered[-1],
+    }
+
+
 def benchmark_beam_search(
     llm: Any, args: argparse.Namespace, prompts: list[Any], params: Any
 ) -> tuple[list[Any], dict[str, Any]]:
@@ -309,25 +526,15 @@ def benchmark_beam_search(
         execute_beam_batch(llm, args, isolate_prompts(prompts, f"warmup-{iteration}"), params)
 
     latencies_ms: list[float] = []
+    synced_ms: list[float] = []
     returned_beams: list[int] = []
     outputs: list[Any] = []
     for iteration in range(args.repeat):
         isolated = isolate_prompts(prompts, f"benchmark-{iteration}")
-        started = perf_counter()
-        outputs = execute_beam_batch(llm, args, isolated, params)
-        latencies_ms.append((perf_counter() - started) * 1000.0)
-        if len(outputs) != len(prompts):
-            raise RuntimeError(f"expected {len(prompts)} request outputs, got {len(outputs)}")
-        # Count candidates outside timing; do not tokenize/decode or print here.
-        returned_beams.append(sum(len(output.sequences) for output in outputs))
-
-    ordered = sorted(latencies_ms)
-
-    def percentile(fraction: float) -> float:
-        position = (len(ordered) - 1) * fraction
-        lower = int(position)
-        upper = min(lower + 1, len(ordered) - 1)
-        return ordered[lower] + (ordered[upper] - ordered[lower]) * (position - lower)
+        outputs, call_ms, e2e_ms, beams = timed_call(llm, args, isolated, params)
+        latencies_ms.append(call_ms)
+        synced_ms.append(e2e_ms)
+        returned_beams.append(beams)
 
     total_seconds = sum(latencies_ms) / 1000.0
     report: dict[str, Any] = {
@@ -346,21 +553,24 @@ def benchmark_beam_search(
         "warmup_runs": args.warmup_runs,
         "repeat": args.repeat,
         "prefix_caching": "enabled; isolated salt per row and run (cold Prefill)",
-        "timing_scope": "beam_search_v1 API call until output objects return; excludes engine startup, "
-        "warmup, pre-call prompt preparation and post-call result inspection/printing",
-        "batch_latency_ms": {
-            "mean": mean(latencies_ms),
-            "p50": percentile(0.50),
-            "p95": percentile(0.95),
-            "min": ordered[0],
-            "max": ordered[-1],
-        },
+        "multiprocessing": effective_multiprocessing(args),
+        "enable_short_suffix_attention": args.enable_short_suffix_attention,
+        "timing_scope": TIMING_SCOPE,
+        "batch_latency_ms": distribution(latencies_ms),
+        "e2e_ms": distribution(synced_ms),
         "total_timed_seconds": total_seconds,
         "requests_per_second": len(prompts) * len(latencies_ms) / total_seconds,
         "returned_beams_per_second": sum(returned_beams) / total_seconds,
         "runs": [
-            {"run": index + 1, "batch_latency_ms": latency, "returned_beams": beams}
-            for index, (latency, beams) in enumerate(zip(latencies_ms, returned_beams, strict=True))
+            {
+                "run": index + 1,
+                "batch_latency_ms": call_ms,
+                "e2e_ms": e2e_ms,
+                "returned_beams": beams,
+            }
+            for index, (call_ms, e2e_ms, beams) in enumerate(
+                zip(latencies_ms, synced_ms, returned_beams, strict=True)
+            )
         ],
     }
     if getattr(args, "dynamic_beam_widths", None) is not None:
@@ -372,6 +582,148 @@ def benchmark_beam_search(
             mode="cot_beam",
             input_len=None,
             cot_input_tokens=len(prompts[0]["prompt_token_ids"]),
+            cot_max_tokens=args.cot_max_tokens,
+            cot_on_limit=args.cot_on_limit,
+            timing_scope="CoT generation, token handoff and beam_search_v1 through the "
+            "device synchronize; excludes startup, warmup and printing",
+        )
+    return outputs, report
+
+
+def _batched(items: list[Any], size: int) -> list[list[Any]]:
+    """Split ``items`` into consecutive groups of at most ``size``."""
+    return [items[start : start + size] for start in range(0, len(items), size)]
+
+
+def dataset_prompt_token_ids(tokenizer: Any, args: argparse.Namespace) -> list[list[int]]:
+    """Encode the AB harness's prompt set, so both measure the same work.
+
+    Same dataset, task, sample size and seed as
+    ``tools/AB_Tests/run_v1_offline_benchmark.py``. ``OneRecDataset`` shuffles with a
+    fixed seed, so both harnesses see the same rows in the same order.
+    """
+    # Running an example by path puts only its own directory on sys.path, and
+    # benchmarks/ is not an installed package.
+    repo_root = Path(__file__).resolve().parents[3]
+    if (repo_root / "benchmarks").is_dir() and str(repo_root) not in sys.path:
+        sys.path.insert(0, str(repo_root))
+
+    from benchmarks.open_one_rec.open_one_rec_dataset import OneRecDataset
+
+    sample_size = max(args.num_prompts, args.warmup_requests)
+    dataset = OneRecDataset(
+        dataset_path=str(args.dataset_dir),
+        task_types=[args.task],
+        tokenizer=tokenizer,
+        custom_input_len=args.input_len - 1,
+        sample_size=sample_size,
+    )
+    requests = dataset.sample(num_requests=sample_size, tokenizer=tokenizer, no_oversample=True)
+    if len(requests) < sample_size:
+        raise RuntimeError(f"requested {sample_size} samples, dataset returned {len(requests)}")
+    return [
+        [int(token) for token in tokenizer.encode(request.prompt, add_special_tokens=False)]
+        for request in requests
+    ]
+
+
+def benchmark_dataset_beam_search(
+    llm: Any, args: argparse.Namespace, tokenizer: Any, params: Any
+) -> tuple[list[Any], dict[str, Any]]:
+    """Measure one prompt group per call, cold then warm, exactly as the AB harness does.
+
+    A prefix-cache reset before every measured group makes the first call of the pair
+    a cold Prefill miss and the identical second call a warm hit, so these
+    ``miss``/``hit`` distributions are the AB report's ``e2e_ms`` pair.
+    """
+    from vllm.inputs import tokens_input
+
+    prompt_token_ids_list = dataset_prompt_token_ids(tokenizer, args)
+
+    def measure(group: list[list[int]]) -> tuple[list[Any], float, float, int]:
+        return timed_call(llm, args, [tokens_input(list(prompt)) for prompt in group], params)
+
+    for group in _batched(prompt_token_ids_list[: args.warmup_requests], args.batch_size):
+        llm.reset_prefix_cache()
+        measure(group)  # cold miss
+        measure(group)  # warm hit
+
+    miss_call_ms: list[float] = []
+    miss_e2e_ms: list[float] = []
+    hit_call_ms: list[float] = []
+    hit_e2e_ms: list[float] = []
+    returned_beams: list[int] = []
+    outputs: list[Any] = []
+    for group in _batched(prompt_token_ids_list[: args.num_prompts], args.batch_size):
+        if not llm.reset_prefix_cache():
+            raise RuntimeError("prefix cache reset failed before a measured group")
+        outputs, call_ms, e2e_ms, beams = measure(group)
+        miss_call_ms.append(call_ms)
+        miss_e2e_ms.append(e2e_ms)
+        returned_beams.append(beams)
+        _, hit_call_ms_one, hit_e2e_ms_one, _ = measure(group)
+        hit_call_ms.append(hit_call_ms_one)
+        hit_e2e_ms.append(hit_e2e_ms_one)
+
+    measured_calls = len(miss_e2e_ms) + len(hit_e2e_ms)
+    total_seconds = (sum(miss_e2e_ms) + sum(hit_e2e_ms)) / 1000.0
+    report: dict[str, Any] = {
+        "model": str(args.model.resolve()),
+        "catalog": str(args.catalog.resolve()),
+        "dataset_dir": str(args.dataset_dir.resolve()),
+        "task": args.task,
+        "constraint_backend": args.constraint_backend,
+        "execution": args.execution,
+        "batch_size": args.batch_size,
+        "beam_width": args.beam_width,
+        "input_len": args.input_len,
+        "generated_steps": args.generated_steps,
+        "length_penalty": args.length_penalty,
+        "max_model_len": args.max_model_len,
+        "gpu_memory_utilization": args.gpu_memory_utilization,
+        "num_prompts": args.num_prompts,
+        "warmup_requests": args.warmup_requests,
+        "max_num_seqs": engine_knobs(args)["max_num_seqs"],
+        "seed": engine_knobs(args).get("seed"),
+        "prefill_graph_kv_bound": os.environ.get("VLLM_GR_PREFILL_GRAPH_KV_BOUND"),
+        "multiprocessing": effective_multiprocessing(args),
+        "enable_short_suffix_attention": args.enable_short_suffix_attention,
+        "prefix_caching": "enabled; reset_prefix_cache before every measured group (cold miss), "
+        "then the identical group once more (warm hit)",
+        "timing_scope": TIMING_SCOPE,
+        "miss": {
+            "batch_latency_ms": distribution(miss_call_ms),
+            "e2e_ms": distribution(miss_e2e_ms),
+        },
+        "hit": {
+            "batch_latency_ms": distribution(hit_call_ms),
+            "e2e_ms": distribution(hit_e2e_ms),
+        },
+        "returned_beams": returned_beams,
+        "total_timed_seconds": total_seconds,
+        "requests_per_second": args.batch_size * measured_calls / total_seconds,
+        "runs": [
+            {
+                "call": index + 1,
+                "miss_batch_latency_ms": miss_call,
+                "miss_e2e_ms": miss_e2e,
+                "hit_batch_latency_ms": hit_call,
+                "hit_e2e_ms": hit_e2e,
+            }
+            for index, (miss_call, miss_e2e, hit_call, hit_e2e) in enumerate(
+                zip(miss_call_ms, miss_e2e_ms, hit_call_ms, hit_e2e_ms, strict=True)
+            )
+        ],
+    }
+    if getattr(args, "dynamic_beam_widths", None) is not None:
+        report["dynamic_beam_widths"] = list(args.dynamic_beam_widths)
+    if getattr(args, "result_width", None) is not None:
+        report["result_width"] = args.result_width
+    if getattr(args, "cot", False):
+        report.update(
+            mode="cot_beam",
+            input_len=None,
+            cot_input_tokens=len(prompt_token_ids_list[0]),
             cot_max_tokens=args.cot_max_tokens,
             cot_on_limit=args.cot_on_limit,
             timing_scope="CoT generation, token handoff and beam_search_v1 until outputs return; "
@@ -737,6 +1089,8 @@ def run(args: argparse.Namespace, artifact_path: Path) -> None:
         "worker_decision": True,
         "max_width": args.beam_width,
         "max_decode_steps": args.generated_steps,
+        # Opt-in: the fused path requires FA2 and compatible model geometry.
+        "enable_short_suffix_attention": args.enable_short_suffix_attention,
     }
     vllm_gr_config: dict[str, Any] = {
         "schema_version": 1,
@@ -773,6 +1127,8 @@ def run(args: argparse.Namespace, artifact_path: Path) -> None:
         length_penalty=args.length_penalty,
     )
 
+    engine_kwargs = engine_knobs(args)
+
     with GRLLM(
         model=str(args.model.resolve()),
         trust_remote_code=True,
@@ -784,32 +1140,44 @@ def run(args: argparse.Namespace, artifact_path: Path) -> None:
         # The V1 input processor appends the begin token to every prompt, so a
         # B-wide Prefill schedules B * (input_len + 1) tokens, not B * input_len.
         max_num_batched_tokens=max(args.max_model_len, prefill_capacity),
-        max_num_seqs=max(args.beam_width, args.batch_size),
+        # --dataset-dir pins max_num_seqs to the batch size (the AB harness value);
+        # otherwise the wider default keeps the Prefill capture set unchanged.
+        max_num_seqs=engine_kwargs.pop("max_num_seqs"),
         max_logprobs=candidate_width,
+        **engine_kwargs,
         gpu_memory_utilization=args.gpu_memory_utilization,
         enforce_eager=is_npu and args.execution == "eager",
         **profiler_engine_kwargs(args),
     ) as llm:
         tokenizer = llm.get_tokenizer()
-        if cot_prompt_ids is not None:
-            prompt_token_ids = cot_prompt_ids
-            print(f"mode=cot_beam input_tokens={len(prompt_token_ids)}; --input-len is not used")
-        else:
-            prompt_token_ids = make_prompt(tokenizer, args.prompt.resolve(), args.input_len)
-        # Keep prefix caching enabled, but prevent duplicate batch rows from
-        # sharing the same prompt block before their atomic Prefill completes.
-        request_prompts = [
-            tokens_input(
-                list(prompt_token_ids),
-                cache_salt=f"offline-beam-v1-row-{request_index}",
-            )
-            for request_index in range(args.batch_size)
-        ]
+        # --dataset-dir builds its own prompts from the dataset, one per call, so
+        # there is no single prompt to load here; --prompt is None in that mode.
+        request_prompts: list[Any] = []
+        if args.dataset_dir is None:
+            if cot_prompt_ids is not None:
+                prompt_token_ids = cot_prompt_ids
+                print(
+                    f"mode=cot_beam input_tokens={len(prompt_token_ids)}; --input-len is not used"
+                )
+            else:
+                prompt_token_ids = make_prompt(tokenizer, args.prompt.resolve(), args.input_len)
+            # Keep prefix caching enabled, but prevent duplicate batch rows from
+            # sharing the same prompt block before their atomic Prefill completes.
+            request_prompts = [
+                tokens_input(
+                    list(prompt_token_ids),
+                    cache_salt=f"offline-beam-v1-row-{request_index}",
+                )
+                for request_index in range(args.batch_size)
+            ]
         benchmark = None
-        if args.repeat is not None:
-            outputs, benchmark = benchmark_beam_search(llm, args, request_prompts, params)
+        if args.dataset_dir is not None:
+            outputs, benchmark = benchmark_dataset_beam_search(llm, args, tokenizer, params)
         else:
-            outputs = run_beam_search(llm, args, request_prompts, params)
+            if args.repeat is not None:
+                outputs, benchmark = benchmark_beam_search(llm, args, request_prompts, params)
+            else:
+                outputs = run_beam_search(llm, args, request_prompts, params)
         if getattr(args, "cot", False):
             print(json.dumps({"cot_beam": args.cot_last_report}, ensure_ascii=False))
             if any(row["thinking_truncated"] for row in args.cot_last_report["requests"]):
@@ -889,13 +1257,14 @@ def run(args: argparse.Namespace, artifact_path: Path) -> None:
 
 def main() -> None:
     args = parse_args()
+    configure_multiprocessing(args)
     paths = (
         (args.model, args.prompt)
         if args.enable_thinking
         else (args.model, args.catalog, args.prompt)
     )
-    for path in paths:
-        if not path.exists():
+    for path in (*paths, args.dataset_dir):
+        if path is not None and not path.exists():
             raise FileNotFoundError(path)
     if args.batch_size <= 0:
         raise ValueError("--batch-size must be positive")
