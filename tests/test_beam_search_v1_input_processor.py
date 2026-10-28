@@ -348,10 +348,13 @@ def test_explicit_candidate_width_rejects_a_non_uniform_dynamic_schedule() -> No
         )
         BeamSearchInputProcessor(engine).process_offline_inputs(llm, request)
 
-    # Configured K plus a shrinking schedule: rejected.
-    with pytest.raises(BeamSearchRequestError, match="non-uniform"):
+    # Configured K with stage widths that retain less than K: rejected,
+    # because the executed top-k still follows the active stage width.
+    with pytest.raises(BeamSearchRequestError, match="does not match"):
         _submit(2, [2, 2, 1])
-    # Configured K plus a uniform schedule: still a fixed width, accepted.
+    with pytest.raises(BeamSearchRequestError, match="does not match"):
+        _submit(2, [1, 1, 1])
+    # Every stage retaining exactly K: accepted.
     _submit(2, [2, 2, 2])
     # No configured K: dynamic schedules keep working exactly as before.
     _submit(None, [2, 2, 1])
