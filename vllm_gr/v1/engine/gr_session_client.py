@@ -170,7 +170,13 @@ def _terminal_result(request: BeamBatchRequest, output: Any) -> BeamBatchResult:
 def submit_gr_session_sync(engine: Any, request: BeamBatchRequest) -> SyncGRSessionHandle:
     native_request = request.items[0].request
     engine.output_processor.add_request(native_request, None)
-    engine.engine_core.submit_gr_session(request)
+    try:
+        engine.engine_core.submit_gr_session(request)
+    except BaseException:
+        # EngineCore never accepted the session, so nothing will ever finish
+        # this frontend registration. Drop it before the caller sees the error.
+        engine.output_processor.abort_requests([native_request.request_id], internal=True)
+        raise
     return SyncGRSessionHandle(request)
 
 
@@ -191,6 +197,14 @@ def abort_gr_session_sync(engine: Any, session_id: str) -> None:
     # A retry must reach Core even after frontend routing has been removed.
     engine.output_processor.abort_requests([session_id], internal=True)
     core = engine.engine_core
+    if hasattr(core, "engine_core"):
+        from vllm_gr.v1.engine.core_client_patch import inproc_engine_failure
+
+        if inproc_engine_failure(core) is not None:
+            # EngineCore failed during a step. Its in-flight dispatches will
+            # never drain, so the session cannot retire; the caller already
+            # holds the EngineDeadError that carries the failure as its cause.
+            return
     core.abort_requests([session_id])
     if hasattr(core, "engine_core"):
         while not core.engine_core.is_gr_session_retired(session_id):
@@ -206,13 +220,21 @@ def release_gr_session_sync(engine: Any, session_id: str) -> None:
 
 
 async def submit_gr_session_async(engine: Any, request: BeamBatchRequest) -> AsyncGRSessionHandle:
+    from vllm.v1.engine.exceptions import EngineDeadError
     from vllm.v1.engine.output_processor import RequestOutputCollector
 
     native_request = request.items[0].request
     collector = RequestOutputCollector(native_request.sampling_params.output_kind, request.batch_id)
     engine.output_processor.add_request(native_request, None, queue=collector)
     engine._run_output_handler()
-    await engine.engine_core.submit_gr_session_async(request)
+    try:
+        await engine.engine_core.submit_gr_session_async(request)
+    except EngineDeadError:
+        # Nothing reached EngineCore, so nothing will finish this registration.
+        # Other failures may have been delivered; the caller's rollback aborts
+        # those through EngineCore as well.
+        engine.output_processor.abort_requests([native_request.request_id], internal=True)
+        raise
     return AsyncGRSessionHandle(request, collector)
 
 

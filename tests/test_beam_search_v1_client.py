@@ -495,6 +495,71 @@ def test_engine_dead_propagates_without_sync_cleanup_retries(operation: str) -> 
     assert len(calls) == 1
 
 
+def test_inproc_step_failure_reaches_the_caller_with_its_cause() -> None:
+    """A failed in-process step ends the call; cleanup must neither hang nor mask it.
+
+    This is the path that hung: cleanup aborted the session and stepped the
+    engine until it retired, which never happens after a failed dispatch. It
+    also checks that the ``finally`` cleanup does not replace the
+    EngineDeadError carrying the step failure with a new one.
+    """
+    from vllm.v1.engine.core_client import InprocClient
+    from vllm.v1.engine.exceptions import EngineDeadError
+
+    from tests.test_gr_async_scheduler import _batch_request
+    from vllm_gr.v1.engine.core_client_patch import apply_engine_client_patches
+    from vllm_gr.v1.engine.gr_session_client import (
+        abort_gr_session_sync,
+        release_gr_session_sync,
+        submit_gr_session_sync,
+        wait_gr_session_sync,
+    )
+
+    oom = RuntimeError("CUDA out of memory (test)")
+    calls = {"steps": 0, "retired_checks": 0}
+
+    def step_fn() -> NoReturn:
+        calls["steps"] += 1
+        raise oom
+
+    def is_gr_session_retired(session_id: str) -> bool:
+        del session_id
+        calls["retired_checks"] += 1
+        if calls["retired_checks"] > 10:
+            raise AssertionError("cleanup is waiting for a session that cannot retire")
+        return False
+
+    apply_engine_client_patches()
+    core_client = object.__new__(InprocClient)
+    core_client.engine_core = SimpleNamespace(
+        _handle_submit_gr_session=lambda batch: None,
+        step_fn=step_fn,
+        post_step=lambda model_executed: None,
+        abort_requests=lambda ids: None,
+        is_gr_session_retired=is_gr_session_retired,
+    )
+    engine = SimpleNamespace(
+        engine_core=core_client,
+        output_processor=SimpleNamespace(
+            add_request=lambda request, prompt: None,
+            abort_requests=lambda ids, internal: [],
+        ),
+    )
+    engine.step = lambda: core_client.get_output().outputs
+    engine.submit_gr_session = lambda request: submit_gr_session_sync(engine, request)
+    engine.wait_gr_session = lambda sid, handle: wait_gr_session_sync(engine, sid, handle)
+    engine.abort_gr_session = lambda sid: abort_gr_session_sync(engine, sid)
+    engine.release_gr_session = lambda sid: release_gr_session_sync(engine, sid)
+
+    frontend = BeamSearchClient(SimpleNamespace(llm_engine=engine))
+    frontend.prepare_request = lambda call: _batch_request()
+    with pytest.raises(EngineDeadError) as raised:
+        run_beam_search_v1(frontend, OfflineBeamSearchRequest([[1, 2]], object()))
+
+    assert raised.value.__cause__ is oom
+    assert calls == {"steps": 1, "retired_checks": 0}
+
+
 @pytest.mark.parametrize("operation", ["submit", "wait", "close"])  # type: ignore[misc]
 def test_engine_dead_propagates_and_ends_async_cleanup(operation: str) -> None:
     from vllm.v1.engine.exceptions import EngineDeadError

@@ -219,6 +219,10 @@ def _validate_engine_clients_patch() -> str | None:
 
     from vllm_gr.v1.engine.core_client import submit_gr_session_async
     from vllm_gr.v1.engine.core_client_patch import (
+        inproc_abort_requests,
+        inproc_add_request,
+        inproc_get_output,
+        inproc_shutdown,
         inproc_submit_gr_session,
         sync_mp_submit_gr_session,
     )
@@ -227,6 +231,10 @@ def _validate_engine_clients_patch() -> str | None:
         getattr(AsyncMPClient, "submit_gr_session_async", None) is submit_gr_session_async
         and getattr(SyncMPClient, "submit_gr_session", None) is sync_mp_submit_gr_session
         and getattr(InprocClient, "submit_gr_session", None) is inproc_submit_gr_session
+        and getattr(InprocClient, "get_output", None) is inproc_get_output
+        and getattr(InprocClient, "add_request", None) is inproc_add_request
+        and getattr(InprocClient, "abort_requests", None) is inproc_abort_requests
+        and getattr(InprocClient, "shutdown", None) is inproc_shutdown
     )
     return _verified(valid, "EngineCore client methods are not fully installed")
 
@@ -238,8 +246,16 @@ def _validate_async_llm_patch() -> str | None:
 
     from vllm_gr.v1.engine import gr_session_client
     from vllm_gr.v1.engine.async_llm import _PROCESS_OUTPUTS_PATCH_MARKER
+    from vllm_gr.v1.engine.core_client_patch import (
+        async_llm_add_request,
+        llm_engine_add_request,
+    )
 
-    valid = bool(getattr(OutputProcessor.process_outputs, _PROCESS_OUTPUTS_PATCH_MARKER, False))
+    valid = (
+        bool(getattr(OutputProcessor.process_outputs, _PROCESS_OUTPUTS_PATCH_MARKER, False))
+        and getattr(LLMEngine, "add_request", None) is llm_engine_add_request
+        and getattr(AsyncLLM, "_add_request", None) is async_llm_add_request
+    )
     for cls, suffix in ((LLMEngine, "sync"), (AsyncLLM, "async")):
         for operation in ("submit", "wait", "abort", "release"):
             name = f"{operation}_gr_session"

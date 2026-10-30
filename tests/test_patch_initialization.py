@@ -732,9 +732,13 @@ def test_npu_spawn_patch_forces_spawn_only_when_npu_initialized(
         ("AsyncMPClient", "submit_gr_session_async"),
         ("SyncMPClient", "submit_gr_session"),
         ("InprocClient", "submit_gr_session"),
+        ("InprocClient", "get_output"),
+        ("InprocClient", "add_request"),
+        ("InprocClient", "abort_requests"),
+        ("InprocClient", "shutdown"),
     ],
 )  # type: ignore[misc]
-def test_client_validator_rejects_missing_merged_submission(
+def test_client_validator_rejects_missing_client_patch(
     monkeypatch: pytest.MonkeyPatch, class_name: str, method_name: str
 ) -> None:
     from vllm.v1.engine import core_client
@@ -748,15 +752,25 @@ def test_client_validator_rejects_missing_merged_submission(
     assert _validate_engine_clients_patch() == "EngineCore client methods are not fully installed"
 
 
+@pytest.mark.parametrize(
+    ("class_name", "method_name"),
+    [
+        ("AsyncLLM", "submit_gr_session"),
+        ("AsyncLLM", "_add_request"),
+        ("LLMEngine", "add_request"),
+    ],
+)  # type: ignore[misc]
 def test_async_llm_validator_rejects_missing_merged_submission(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, class_name: str, method_name: str
 ) -> None:
     from vllm.v1.engine.async_llm import AsyncLLM
+    from vllm.v1.engine.llm_engine import LLMEngine
 
     from vllm_gr.patch import _validate_async_llm_patch
     from vllm_gr.v1.engine.core_client_patch import apply_async_llm_patches
 
     apply_async_llm_patches()
     assert _validate_async_llm_patch() is None
-    monkeypatch.delattr(AsyncLLM, "submit_gr_session")
+    owner = {"AsyncLLM": AsyncLLM, "LLMEngine": LLMEngine}[class_name]
+    monkeypatch.delattr(owner, method_name)
     assert _validate_async_llm_patch() == "GR frontend lifecycle methods are not fully installed"
