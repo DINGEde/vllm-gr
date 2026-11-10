@@ -1,3 +1,7 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM-GR project
+# Adapted from https://github.com/Kuaishou-OneRec/OpenOneRec
+
 """
 Recommendation Reason LLM Evaluation Utilities
 

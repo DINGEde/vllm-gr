@@ -137,8 +137,8 @@ repos:
     - id: check-spdx-header
       name: Check SPDX headers
       entry: python tools/pre_commit/check_spdx_header.py
-      exclude: ^benchmarks/open_one_rec/.*\.py$
       language: python
+      additional_dependencies: [packaging==26.3]
       types: [python]
 
     - id: check-filenames

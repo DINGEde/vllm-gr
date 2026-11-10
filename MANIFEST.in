@@ -1,0 +1,3 @@
+include LICENSE NOTICE
+include benchmarks/open_one_rec/qwen3_soft_switch.jinja2
+include benchmarks/open_one_rec/qwen3_soft_switch.jinja2.license

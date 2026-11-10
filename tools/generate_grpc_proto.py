@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM-GR project
+# Adapted from https://github.com/vllm-project/vllm
 """Generate the extended SMG bindings with package-relative imports/private pools.
 
 Usage:
@@ -22,6 +23,31 @@ GRPC_ROOT = Path(__file__).resolve().parents[1] / "vllm_gr/entrypoints/grpc"
 GENERATED_FILES = ("common_pb2.py", "vllm_engine_pb2.py", "vllm_engine_pb2_grpc.py")
 
 
+def proto_notice(proto: Path) -> str:
+    """Return the schema's leading comment block as Python comments.
+
+    The .proto header is the single source of truth for SPDX and attribution
+    lines; they are copied verbatim, so a binding is never attributed
+    differently from the schema it was generated from.
+
+    Scanning steps over blank lines instead of stopping at one, so a blank line
+    inside the header cannot truncate the notice without anyone noticing. The
+    block ends at the first line that is neither a comment nor blank; trailing
+    blanks are dropped, and a file with no comment block yields no notice.
+    """
+    lines: list[str] = []
+    for line in proto.read_text(encoding="utf-8").splitlines():
+        if line.startswith("//"):
+            lines.append("#" + line[2:])
+        elif line.strip():
+            break
+        else:
+            lines.append("#")
+    while lines and lines[-1] == "#":
+        lines.pop()
+    return "".join(line + "\n" for line in lines)
+
+
 def generate(output: Path) -> None:
     proto_dir = GRPC_ROOT / "proto"
     subprocess.run(
@@ -40,7 +66,7 @@ def generate(output: Path) -> None:
     # common.proto defines messages only; protoc emits no service bindings here.
     (output / "common_pb2_grpc.py").unlink(missing_ok=True)
     for path in output.glob("*_pb2*.py"):
-        text = path.read_text()
+        text = path.read_text(encoding="utf-8")
         for module in ("common_pb2", "vllm_engine_pb2"):
             text = text.replace(f"import {module} as ", f"from . import {module} as ")
         if path.name.endswith("_pb2.py"):
@@ -58,7 +84,14 @@ def generate(output: Path) -> None:
                 text = text.replace("_descriptor_pool.Default()", pool)
             module = "vllm_gr.entrypoints.grpc.generated." + path.stem
             text = text.replace(f"'{path.stem}'", repr(module))
-        path.write_text(text)
+        schema = path.name.split("_pb2")[0] + ".proto"
+        notice = proto_notice(proto_dir / schema)
+        first, newline, rest = text.partition("\n")
+        if "coding:" in first:
+            text = first + newline + notice + rest
+        else:
+            text = notice + text
+        path.write_text(text, encoding="utf-8", newline="\n")
 
 
 def check() -> int:
@@ -73,10 +106,12 @@ def check() -> int:
             return 1
         stale = []
         for name in GENERATED_FILES:
-            expected = (fresh / name).read_text().splitlines(keepends=True)
+            expected = (fresh / name).read_text(encoding="utf-8").splitlines(keepends=True)
             current_path = committed / name
             current = (
-                current_path.read_text().splitlines(keepends=True) if current_path.exists() else []
+                current_path.read_text(encoding="utf-8").splitlines(keepends=True)
+                if current_path.exists()
+                else []
             )
             if expected != current:
                 stale.append(name)

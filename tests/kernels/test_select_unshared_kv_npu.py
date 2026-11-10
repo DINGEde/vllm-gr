@@ -1,5 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM-GR project
+# Copyright 2025 The xLLM Authors. All Rights Reserved.
+# Adapted from https://github.com/xLLM-AI/xllm-ops
+
 """NPU precision guard tests for the fused ``select_unshared_kv`` op.
 
 Derived from xllm-ops' ``test_select_unshared_kv.py``.  The op rearranges the

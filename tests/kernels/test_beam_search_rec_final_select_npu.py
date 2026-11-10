@@ -1,5 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM-GR project
+# Copyright 2026 The xLLM Authors. All Rights Reserved.
+# Adapted from https://github.com/xLLM-AI/xllm-ops
+
 """NPU precision guard tests for the fused ``beam_search_rec_final_select`` op.
 
 Derived from xllm-ops' ``test_onerec_final_beam_select.py``.  The CPU golden

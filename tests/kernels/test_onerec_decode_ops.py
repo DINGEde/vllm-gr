@@ -1,5 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM-GR project
+# Copyright 2025 The xLLM Authors. All Rights Reserved.
+# Copyright 2026 The xLLM Authors. All Rights Reserved.
+# Adapted from https://github.com/xLLM-AI/xllm-ops
+
 """Correctness tests derived from the corresponding xllm-ops NPU tests."""
 
 from __future__ import annotations

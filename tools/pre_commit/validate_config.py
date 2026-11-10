@@ -1,5 +1,7 @@
-# SPDX-License-Identifier: Apache-2.0
+# SPDX-License-Identifier: Apache-2.0 AND MIT
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+# Copyright (c) David Lord
+# Adapted from https://davidism.com/attribute-docstrings/
 """
 Ensures all fields in a config dataclass have default values
 and that each field has a docstring.

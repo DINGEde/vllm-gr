@@ -1,8 +1,9 @@
-# SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+# SPDX-License-Identifier: Apache-2.0 AND BSD-3-Clause
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM-GR project
+# Adapted from https://github.com/pytorch/pytorch
+# Adapted from https://github.com/vllm-project/vllm
 
 # ruff: noqa
-# code borrowed from https://github.com/pytorch/pytorch/blob/main/torch/utils/collect_env.py
 
 import datetime
 import locale

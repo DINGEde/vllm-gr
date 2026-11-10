@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM-GR project
 """Shared scoring for candidates selected by a Constraint Table.
 
 Constraint Tables restrict which tokens may survive Top-K, but Beam Search
