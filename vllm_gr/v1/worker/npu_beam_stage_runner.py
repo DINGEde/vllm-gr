@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM-GR project
 """Persistent eager NPU runtime for a fixed Beam Batch Session.
 
 Prefill stays logical B; Decode executes physical B*W rows. Candidate state,

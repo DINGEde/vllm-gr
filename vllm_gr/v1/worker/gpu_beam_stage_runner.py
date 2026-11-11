@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM-GR project
 """GPU V1 adapter for asynchronous scheduling dispatches and persistent Beam state.
 
 Bindings are views of the existing Worker session registry. The only supported

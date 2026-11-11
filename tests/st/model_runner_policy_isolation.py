@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM-GR project
 """OneRec V1/V2 execution regression; run each runner/mode in a fresh process.
 
 This is an explicit real-model probe, not a pytest-collected test or benchmark.

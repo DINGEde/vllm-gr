@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM-GR project
 """ModelRunner V2 execution hooks for the persistent GR stage runner.
 
 The stage-runner core (``gpu_beam_stage_runner.GPUBeamStageRunner``) is

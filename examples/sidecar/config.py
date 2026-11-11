@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM-GR project
 """Composition example for servers implementing the sidecar control contract.
 
 Run: python -m vllm_gr.sidecar --config examples/sidecar/config.py

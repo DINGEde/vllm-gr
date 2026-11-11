@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM-GR project
 """NOVI-compatible ready-version discovery and pinned HDFS CLI downloads.
 
 Reference: GR-NOVI/inference/deploy/sidecar_model_updater.py. Supports its

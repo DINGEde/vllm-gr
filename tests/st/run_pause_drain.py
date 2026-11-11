@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM-GR project
 """Verify Sidecar pause/reload/resume while a real GR request drains.
 
 The test launcher delays GR stages to expose an in-flight request and records

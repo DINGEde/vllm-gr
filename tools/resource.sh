@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM-GR project
+
 
 # This script is meant to be sourced.
 # It provides utilities to allocate and manage local GPU or NPU resources.

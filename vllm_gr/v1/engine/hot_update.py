@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM-GR project
 """Individual Core control operations; Sidecar owns the update sequence.
 
 Reload is a synchronous utility call on the Core thread and returns after all

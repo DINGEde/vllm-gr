@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM-GR project
 """ModelRunner V2 GPU wrappers for beam_search_v1 (persistent GR stage path).
 
 The V2 runner (``vllm.v1.worker.gpu.model_runner.GPUModelRunner``) replaces the

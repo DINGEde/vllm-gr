@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM-GR project
 'use strict';
 
 // This module must be loaded from the pinned base revision, not the PR.

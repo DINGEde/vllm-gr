@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM-GR project
 """xLLM fused-operator execution primitives for the Beam Attention backend.
 
 NPU-only execution module selected by ``_get_platform_execution_module`` when

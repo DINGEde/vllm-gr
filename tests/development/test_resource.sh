@@ -1,4 +1,7 @@
 #!/bin/bash
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM-GR project
+
 #
 # Integration test for resource.sh
 # This script verifies GPU allocation and locking mechanisms.
