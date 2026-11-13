@@ -9,12 +9,13 @@ pre_upgrade_baseline:
 current_runtime:
   cuda:
     vllm: "0.30.0"
-    status: validated_with_release_precision_decision_pending
+    upgrade_evidence: "https://github.com/JiusiServe/vllm-gr/pull/553"
+    upgrade_validation_status: validated_with_release_precision_decision_pending
   npu:
     vllm: "0.30.0"
     vllm_ascend: "0.30.0rc2"
     validation_baseline_commit: "43bc85f9b375281452d0af7005dc9fa752f43884"
-    status: baseline_validated_config_refactor_requires_npu_revalidation
+    upgrade_validation_status: baseline_validated_config_refactor_requires_npu_revalidation
 
 patches:
   - id: GR-PATCH-000

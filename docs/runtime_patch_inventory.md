@@ -13,20 +13,20 @@ The recorded pre-upgrade runtime baseline is:
 
 The upstream source revisions used for compatibility analysis are:
 
-- `vllm-project/vllm@releases/v0.22.1`
-    - commit: `dd72658e7db0c6a674f473f6f9f0f5c2ebe7e523`
-- `vllm-project/vllm-ascend@releases/v0.22.1rc`
-    - commit: `f528cdd561969730504bfe8b5e96b6b7e69d6c4f`
+- [vLLM 0.22.1 release snapshot](https://github.com/vllm-project/vllm/tree/dd72658e7db0c6a674f473f6f9f0f5c2ebe7e523)
+- [vLLM-Ascend 0.22.1 release candidate snapshot](https://github.com/vllm-project/vllm-ascend/tree/f528cdd561969730504bfe8b5e96b6b7e69d6c4f)
 
 The vLLM-Ascend release branch is movable, so compatibility conclusions must retain the exact source commit.
 
-The current CUDA release candidate targets vLLM 0.30.0 and has completed GPU
-functional, packaging, and performance validation. Its release-level precision
-decision remains open. The Ascend 0.30.0rc2 baseline at
-`43bc85f9b375281452d0af7005dc9fa752f43884` completed NPU validation
-(unit, integration, eager/graph end-to-end, dynamic beam, prefill graphs, and
-benchmark gates). The subsequent config-filter refactor has host regression
-coverage and still requires NPU startup and inference revalidation.
+The current runtime targets vLLM 0.30.0 on CUDA and vLLM-Ascend 0.30.0rc2
+on Ascend. See the [runtime version contract](../README.md#runtime-version-contract)
+for installation requirements. The [upgrade evidence](https://github.com/JiusiServe/vllm-gr/pull/553)
+records historical validation and its limits. At the time of the upgrade,
+CUDA functional, packaging and performance checks were complete and the
+release-level precision decision was pending. The
+[Ascend validation baseline](https://github.com/JiusiServe/vllm-gr/commit/43bc85f9b375281452d0af7005dc9fa752f43884)
+predated the config-filter refactor. The refactor had host regression coverage at the time of that inventory update.
+NPU startup and inference revalidation remained outstanding at that point.
 
 ## Risk Levels
 

@@ -76,12 +76,10 @@ candidate backend before it can become active.
 
 ### V1 compatibility boundary
 
-ModelRunner V1 retains the behavior of the rebased parent `7ee1d95`: the GR
-Prefill grid and per-request capacity clamp, exact native-input admission for
-async Prefill, B=1 startup Decode capture, and lazy capture against stage-owned
-buffers when a new batch needs a graph. Its Backend row bound, retirement and
-shutdown semantics remain unchanged. Upstream V1/NPU fixes in that parent,
-including B=2 Prefill capture, are retained.
+ModelRunner V1 uses the GR Prefill grid, clamps capture to the per-request
+capacity and requires exact native input extents for async Prefill admission.
+It captures B=1 Decode at startup and can lazily capture against stage-owned
+buffers when a new batch needs a graph.
 
 Set `beam.adapter_cache_enabled: true` in the canonical service configuration
 to opt into cross-batch adapter caching. It defaults to false, preserving the
@@ -300,11 +298,10 @@ V2 FULL Prefill replay, fixed input addresses, absence of V2 request-time
 capture, candidate structure and resource release. Repeated matching
 shapes must produce identical outputs after batch switches.
 
-To verify V1 baseline behavior, copy this single probe into a checkout of
-`7ee1d95`, run `--runner v1 --mode graph`, then run the current checkout with
-`--reference /path/to/baseline/results.json`. This requires exact ordered
-candidates and scores for every matching case. `--expected-source` can
-additionally assert the Worker imports the intended checkout.
+To compare two revisions, run the same probe with matching inputs and runner
+settings. Pass the first run's JSON as `--reference` in the second run to
+require exact ordered candidates and scores for matching cases.
+`--expected-source` can check the Worker's import source.
 
 Cross-B or Graph/Eager equality is a separate numerical investigation; it is
 not a required identity in this probe. Different shapes can change BF16
