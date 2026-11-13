@@ -21,7 +21,8 @@ matches the version of vLLM-GR you are running.
   run a model through the standard inference path.
 - [gRPC and NumPy token inputs](grpc_numpy_upgrade.md) and
   [Nginx load balancing](data_parallelism.md): integrate and scale serving.
-- [Multi-Trie Constraint Tables](multi_root_constraint_table.md) and
+- [Catalog-constrained HTTP serving](../examples/online_serving/catalog/README.md),
+  [Multi-Trie Constraint Tables](multi_root_constraint_table.md), and
   [unconstrained Beam Search on NPU](npu_unconstrained_beam.md): choose how to
   constrain generated candidates.
 - [Security policy](../SECURITY.md): review deployment boundaries and report
