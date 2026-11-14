@@ -11,7 +11,7 @@ import tempfile
 import types
 import unittest
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -289,12 +289,14 @@ class EmptyFileTests(unittest.TestCase):
         self.tracked = ["vendored/copy.py", "vendored/__init__.py", "vllm_gr/pkg/__init__.py"]
 
     def errors(self) -> list[str]:
-        hook = self.hook
+        # The hook is imported by path, so mypy has no symbol table for it;
+        # its monkey-patched module attributes are opaque to the checker.
+        hook: Any = self.hook
         original = hook.POLICY_PATH, hook.REPO_ROOT, hook.tracked_sources
         hook.POLICY_PATH, hook.REPO_ROOT = self.policy_path, self.root
         hook.tracked_sources = lambda: list(self.tracked)
         try:
-            return hook.check_all_tracked()
+            return cast("list[str]", hook.check_all_tracked())
         finally:
             hook.POLICY_PATH, hook.REPO_ROOT, hook.tracked_sources = original
 
