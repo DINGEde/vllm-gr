@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM-GR project
 """Exercise GR stage boundaries against real ModelRunner V2 request state."""
 
+from dataclasses import replace
 from types import SimpleNamespace
 
 import pytest
@@ -10,9 +11,20 @@ from vllm.config import CUDAGraphMode
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
 
-from tests.kernels.test_gpu_beam_stage_runner import dispatch, metadata, runtime
+from tests.kernels.test_gpu_beam_stage_runner import (
+    admission_worker,
+    dispatch,
+    metadata,
+    runtime,
+)
 from tests.kernels.v2_input_test_utils import make_native_v2_worker
-from vllm_gr.v1.engine.gr_async_scheduler import GR_WORKER_RESULT_ATTR
+from vllm_gr.v1.beam.execution_batch import BeamExecutionContractError
+from vllm_gr.v1.engine.beam_search_v1 import validate_dispatch_session
+from vllm_gr.v1.engine.gr_async_scheduler import (
+    GR_STAGE_OUTPUT_ATTR,
+    GR_WORKER_RESULT_ATTR,
+)
+from vllm_gr.v1.worker.gpu_beam_stage_runner import get_stage_runner
 from vllm_gr.v1.worker.gpu_beam_stage_runner_v2 import CudaStageHooksV2
 
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA unavailable")
@@ -127,8 +139,6 @@ def test_terminal_output_retires_native_v2_request():
 
 
 def test_multibatch_native_sort_and_reused_slots_preserve_member_results():
-    from dataclasses import replace
-
     worker = make_native_v2_worker([1], capacity=7)
     states = worker.req_states
     prompts = {"a": [101] * 9, "b": [202] * 2, "c": [303] * 7, "d": [404] * 5}
@@ -167,3 +177,66 @@ def test_multibatch_native_sort_and_reused_slots_preserve_member_results():
         row = states.req_id_to_index[request_id]
         assert states.num_computed_tokens.gpu[row].item() == len(tokens)
     assert states.num_computed_tokens.gpu[states.req_id_to_index["session-0"]].item() == 0
+
+
+# The V2 surface shares the stage-runner core: ``CudaStageHooksV2`` only
+# replaces the native execution surface, so the dispatch-session record has to
+# be built, carried and re-checked here exactly as on the V1 surface.
+@pytest.mark.l2
+def test_v2_hooked_admission_records_the_session_once():
+    worker = admission_worker()
+    first = metadata(0)
+    owner = get_stage_runner(worker, dispatch(first), hooks_type=CudaStageHooksV2)
+    assert isinstance(owner.hooks, CudaStageHooksV2)
+    record = owner._dispatch_session
+    assert record is not None
+    assert record.session_id == first.session_id
+    owner.previous = first
+    assert owner.admit(dispatch(metadata(1))) is not None
+    assert owner._dispatch_session is record
+
+
+@pytest.mark.l2
+def test_v2_decode_does_not_revalidate_the_session_facts(monkeypatch):
+    from vllm_gr.v1.worker import gpu_beam_stage_runner as stage_runner_module
+
+    worker = admission_worker()
+    first = metadata(0)
+    owner = get_stage_runner(worker, dispatch(first), hooks_type=CudaStageHooksV2)
+    owner.previous = first
+
+    def explode(*args, **kwargs):
+        raise AssertionError("Decode revalidation rebuilt the session record")
+
+    monkeypatch.setattr(stage_runner_module, "validate_dispatch_session", explode)
+    assert owner.admit(dispatch(metadata(1))) is not None
+
+
+@pytest.mark.l2
+def test_v2_decode_rejects_a_record_from_another_logical_batch():
+    worker = admission_worker()
+    first = metadata(0)
+    owner = get_stage_runner(worker, dispatch(first), hooks_type=CudaStageHooksV2)
+    owner.previous = first
+    # Same session id, different logical batch: only the batch identity can
+    # catch it, which is the check the step path kept.
+    foreign = replace(metadata(0), request_ids=("session-0:1",))
+    foreign_dispatch = SimpleNamespace(num_scheduled_tokens={"session-0:1": 7})
+    setattr(foreign_dispatch, GR_STAGE_OUTPUT_ATTR, {"session-0": foreign})
+    owner._dispatch_session = validate_dispatch_session(foreign_dispatch)
+    with pytest.raises(
+        BeamExecutionContractError, match="logical Beam batch identity changed across stages"
+    ):
+        owner.admit(dispatch(metadata(1)))
+
+
+@pytest.mark.l2
+def test_v2_decode_still_checks_native_token_extent():
+    worker = admission_worker()
+    first = metadata(0)
+    owner = get_stage_runner(worker, dispatch(first), hooks_type=CudaStageHooksV2)
+    owner.previous = first
+    scheduled = dispatch(metadata(1))
+    scheduled.scheduled_cached_reqs = SimpleNamespace(req_ids=[], resumed_req_ids=set())
+    with pytest.raises(ValueError, match="no matching native request"):
+        owner.admit(scheduled)

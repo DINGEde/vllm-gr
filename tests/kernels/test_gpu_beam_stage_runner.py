@@ -564,7 +564,13 @@ def test_partial_prefill_and_dispatch_identity_rejected_before_writes():
     before = owner.beam.state.sequence.clone()
     with pytest.raises(ValueError, match="dispatch order"):
         owner.admit(dispatch(metadata(stage=1, dispatch=99)))
-    with pytest.raises(ValueError, match="shared execution binding"):
+    # A foreign batch that arrives after a valid stage is rejected either as an
+    # identity change (compared against ``previous``) or as a binding change;
+    # which one fires first is precedence, not behaviour.
+    with pytest.raises(
+        ValueError,
+        match="logical Beam batch identity changed across stages|shared execution binding",
+    ):
         other = replace(
             metadata(stage=1, dispatch=1),
             session_id="other",
