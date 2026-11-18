@@ -129,13 +129,9 @@ def _runtime(monkeypatch: pytest.MonkeyPatch) -> Any:
     return state
 
 
-def test_default_cli_still_requires_catalog_for_beam(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    with pytest.raises(SystemExit) as exc:
-        _args(monkeypatch, tmp_path)
-    assert exc.value.code == 2
-    args = _args(monkeypatch, tmp_path, "--catalog", str(tmp_path / "catalog.json"))
+def test_default_cli_runs_without_catalog(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    args = _args(monkeypatch, tmp_path)
+    assert args.catalog is None
     assert not args.enable_thinking
     assert args.beam_width == 128
     assert args.generated_steps == 3
@@ -238,8 +234,6 @@ def test_thinking_uses_unconstrained_generate_and_exports_utf8_results(
         "--enable-thinking",
         "--constraint-backend",
         "npu",
-        "--catalog",
-        str(tmp_path / "missing-catalog.json"),
         "--batch-size",
         str(batch_size),
         "--execution",
@@ -509,7 +503,7 @@ def test_thinking_profile_stops_when_generation_raises(
 
 
 def test_main_dispatches_thinking_without_catalog_check_or_artifact(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     args = _args(
         monkeypatch,
@@ -527,12 +521,12 @@ def test_main_dispatches_thinking_without_catalog_check_or_artifact(
     def unexpected_beam_call(*args: Any, **kwargs: Any) -> Any:
         raise AssertionError("Thinking dispatch must not allocate a Beam artifact")
 
-    monkeypatch.setattr(example, "parse_args", lambda: args)
     monkeypatch.setattr(example, "run_thinking", lambda options: received.append(options))
     monkeypatch.setattr(example, "run", unexpected_beam_call)
     monkeypatch.setattr(example.tempfile, "TemporaryDirectory", unexpected_beam_call)
     example.main()
     assert received == [args]
+    assert "--catalog is ignored in --enable-thinking mode" in capsys.readouterr().err
 
 
 pytestmark = pytest.mark.cpu_test

@@ -5,6 +5,7 @@
 import argparse
 import json
 import uuid
+from pathlib import Path
 
 import grpc
 import numpy as np
@@ -45,36 +46,69 @@ def generate(stub, rows, *, width=4, max_new_tokens=3):
             raise ValueError("response item order changed")
         beams = item.beams
         flat, offsets = list(beams.output_ids), list(beams.output_offsets)
-        if len(offsets) != width + 1 or not all(beams.has_cumulative_logprob):
+        count = len(offsets) - 1
+        scores = list(beams.cumulative_logprobs)
+        if (
+            not 1 <= count <= width
+            or offsets[0] != 0
+            or offsets[-1] != len(flat)
+            or any(a >= b for a, b in zip(offsets, offsets[1:]))
+            or len(scores) != count
+            or len(beams.has_cumulative_logprob) != count
+            or not all(beams.has_cumulative_logprob)
+        ):
             raise ValueError("incomplete beam output")
         items.append(
             dict(
                 token_ids=[flat[a:b] for a, b in zip(offsets, offsets[1:])],
-                scores=list(beams.cumulative_logprobs),
+                scores=scores,
             )
         )
     return dict(batch_id=batch_id, items=items)
 
 
 def main():
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(
+        description="Send a OneRec prompt or random token IDs for a tiny-model smoke test."
+    )
     parser.add_argument("--address", default="127.0.0.1:50051")
     parser.add_argument("--batch-size", type=int, default=4)
     parser.add_argument("--tokens", type=int, default=4)
     parser.add_argument("--vocab-size", type=int, default=128)
     parser.add_argument("--width", type=int, default=4)
     parser.add_argument("--max-new-tokens", type=int, default=3)
+    parser.add_argument("--model", help="Local OneRec snapshot used by the server")
+    parser.add_argument("--prompt", type=Path, help="UTF-8 OneRec prompt file")
     args = parser.parse_args()
-    rows = np.random.default_rng(7).integers(
-        3,
-        args.vocab_size,
-        size=(args.batch_size, args.tokens),
-        dtype=np.int64,
-    )
+    if bool(args.model) != bool(args.prompt):
+        parser.error("--model and --prompt must be provided together")
+    if args.model:
+        from transformers import AutoTokenizer
+
+        tokenizer = AutoTokenizer.from_pretrained(args.model, trust_remote_code=True)
+        begin_id, end_id = tokenizer.convert_tokens_to_ids(["<|sid_begin|>", "<|sid_end|>"])
+        prompt = args.prompt.read_text(encoding="utf-8")
+        rows = [
+            [*tokenizer.encode(prompt, add_special_tokens=False), begin_id]
+            for _ in range(args.batch_size)
+        ]
+    else:
+        rows = np.random.default_rng(7).integers(
+            3,
+            args.vocab_size,
+            size=(args.batch_size, args.tokens),
+            dtype=np.int64,
+        )
     with grpc.insecure_channel(args.address) as channel:
         result = generate(
             rpc.VllmEngineStub(channel), rows, width=args.width, max_new_tokens=args.max_new_tokens
         )
+    if args.model:
+        result["choices"] = [
+            {"text": tokenizer.decode([begin_id, *ids, end_id], skip_special_tokens=False)}
+            for item in result["items"]
+            for ids in item["token_ids"]
+        ]
     print(json.dumps(result, indent=2))
 
 

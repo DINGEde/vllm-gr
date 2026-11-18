@@ -95,11 +95,10 @@ Run the saved script after the environment setup above:
 python -u npu_beam.py
 ```
 
-No path, artifact digest, tokenizer digest, vocabulary offset, or vocabulary slice
-is needed. An enabled constraint table or a vocabulary slice contradicts
-`constrained_generation=False` and remains an error. The standalone
-`offline_beam_search_v1.py` catalog-based SID example continues to require its
-catalog; the example above uses the public Python API directly.
+Omit the artifact path and digests, vocabulary offset, and vocabulary slice.
+The engine rejects an enabled Constraint Table or a vocabulary slice with
+`constrained_generation=False`. For the catalog-free [offline Beam example](../examples/offline_inference/beam_search/README.md#run-the-v1-example),
+pass `--constraint-backend npu` on Ascend.
 
 `output_mode="full"` returns the usual Beam sequence objects. Omitting the flag
 uses the existing compact output format. No new output type is introduced.

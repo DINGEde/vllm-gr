@@ -3,6 +3,7 @@
 """Device-free regression coverage for the offline NPU graph example."""
 
 import json
+import os
 import sys
 from contextlib import nullcontext
 from pathlib import Path
@@ -80,6 +81,7 @@ def test_constrained_example_rejects_incomplete_sid_at_cli(
     assert example.parse_args().generated_steps == steps
 
 
+@pytest.mark.parametrize("with_catalog", [True, False])  # type: ignore[misc]
 @pytest.mark.parametrize(  # type: ignore[misc]
     "widths,graph_widths", [([8, 4, 2], [4, 8]), ([2, 4, 8], [2, 4])]
 )
@@ -88,12 +90,21 @@ def test_dynamic_beam_example_wires_graphs_and_benchmark(
     tmp_path: Path,
     widths: list[int],
     graph_widths: list[int],
+    with_catalog: bool,
 ) -> None:
     output_path = tmp_path / "benchmark.json"
+    cli_args = _cli_args(tmp_path)
+    if with_catalog:
+        (tmp_path / "prompt.txt").write_text("A custom prompt.", encoding="utf-8")
+    else:
+        index = cli_args.index("--catalog")
+        del cli_args[index : index + 2]
+        index = cli_args.index("--prompt")
+        del cli_args[index : index + 2]
     monkeypatch.setattr(
         sys,
         "argv",
-        _cli_args(tmp_path)
+        cli_args
         + [
             "--dynamic-beam-widths",
             ",".join(str(width) for width in widths),
@@ -126,8 +137,15 @@ def test_dynamic_beam_example_wires_graphs_and_benchmark(
         assert params.dynamic_beam_widths == widths and params.result_width == 2
         return outputs
 
+    def encode(text: str, *, add_special_tokens: bool) -> list[int]:
+        assert not add_special_tokens
+        if text == "\n":
+            return [1]
+        assert text == ("A custom prompt." if with_catalog else "Recommend the next video.")
+        return [11, 12]
+
     llm = SimpleNamespace(
-        get_tokenizer=lambda: SimpleNamespace(convert_ids_to_tokens=lambda ids: ids),
+        get_tokenizer=lambda: SimpleNamespace(encode=encode, convert_ids_to_tokens=lambda ids: ids),
         beam_search_v1=beam_search,
         collective_rpc=lambda name: [stats],
     )
@@ -149,19 +167,37 @@ def test_dynamic_beam_example_wires_graphs_and_benchmark(
         module = ModuleType(name)
         module.__dict__.update(attributes)
         monkeypatch.setitem(sys.modules, name, module)
-    monkeypatch.setattr(example, "build_artifact", lambda *args: ("artifact", "tokenizer"))
-    monkeypatch.setattr(example, "make_prompt", lambda *args: [11, 12])
+    artifact_path = tmp_path / "unused.safetensors"
+    artifact_builds = []
 
-    example.run(args, tmp_path / "unused.safetensors")
+    def build_artifact(*paths: Path) -> tuple[str, str]:
+        artifact_builds.append(paths)
+        return "artifact", "tokenizer"
+
+    monkeypatch.setattr(example, "build_artifact", build_artifact)
+
+    example.run(args, artifact_path if with_catalog else None)
 
     assert params_kwargs["beam_width"] == 8
     assert params_kwargs["dynamic_beam_widths"] == widths
     assert params_kwargs["result_width"] == 2
-    beam_config = engine_kwargs["vllm_gr_config"]["beam"]
+    config = engine_kwargs["vllm_gr_config"]
+    beam_config = config["beam"]
     assert beam_config["max_width"] == 8
     assert beam_config["graph_widths"] == graph_widths
     assert beam_config["graph_batch_size"] == 2
     report = json.loads(output_path.read_text())
+    assert config["constraint_table"]["enabled"] is with_catalog
+    if with_catalog:
+        assert artifact_builds == [(tmp_path, tmp_path / "catalog.json", artifact_path)]
+        assert report["catalog"] == str(tmp_path / "catalog.json")
+        assert report["prompt"] == str(tmp_path / "prompt.txt")
+    else:
+        assert not artifact_builds
+        assert config["constrained_generation"] is False
+        assert "path" not in config["constraint_table"]
+        assert report["catalog"] is None
+        assert report["prompt"] is None
     assert report["dynamic_beam_widths"] == widths and report["result_width"] == 2
     assert report["runs"][0]["returned_beams"] == 4
     assert report["npu_beam_graph"] == stats
@@ -240,6 +276,91 @@ def test_npu_graph_example_requires_replay_only_for_decode(
         output = capsys.readouterr().out
         assert '"npu_beam_graph"' in output
         assert "request=0 returned_beams=1" in output and "request=1 returned_beams=1" in output
+
+
+@pytest.mark.parametrize(  # type: ignore[misc]
+    "backend,override,expected",
+    [
+        ("cuda", None, "1"),
+        ("cuda", "", "1"),
+        ("cuda", "0", "0"),
+        ("npu", None, "0"),
+        ("npu", "1", "0"),
+    ],
+)
+def test_offline_example_selects_model_runner(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    backend: str,
+    override: str | None,
+    expected: str,
+) -> None:
+    key = "VLLM_USE_V2_MODEL_RUNNER"
+    monkeypatch.setenv(key, "0")
+    if override is None:
+        monkeypatch.delenv(key)
+    else:
+        monkeypatch.setenv(key, override)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "example",
+            "--model",
+            str(tmp_path),
+            "--constraint-backend",
+            backend,
+        ],
+    )
+    monkeypatch.setattr(example, "run", lambda args: None)
+
+    example.main()
+
+    assert os.environ[key] == expected
+
+
+@pytest.mark.l1  # type: ignore[misc]
+@pytest.mark.parametrize("length", [2, 1100])  # type: ignore[misc]
+def test_quickstart_submits_prompt_at_natural_length(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, length: int
+) -> None:
+    prompt = tmp_path / "prompt.txt"
+    text = "A custom prompt."
+    prompt.write_text(text, encoding="utf-8")
+    monkeypatch.setattr(sys, "argv", ["example", "--model", str(tmp_path), "--prompt", str(prompt)])
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
+    tokens = list(range(length))
+    submitted: list[list[int]] = []
+
+    def encode(value: str, *, add_special_tokens: bool) -> list[int]:
+        assert not add_special_tokens
+        assert value in (text, "\n")
+        return tokens if value == text else [42]
+
+    def beam_search(prompts: list[dict[str, Any]], *args: Any, **kwargs: Any) -> list[Any]:
+        submitted.extend(prompt["prompt_token_ids"] for prompt in prompts)
+        return [SimpleNamespace(sequences=[])]
+
+    tokenizer = SimpleNamespace(encode=encode)
+    llm = SimpleNamespace(get_tokenizer=lambda: tokenizer, beam_search_v1=beam_search)
+    modules: dict[str, dict[str, Any]] = {
+        "transformers": {
+            "AutoTokenizer": SimpleNamespace(from_pretrained=lambda *a, **k: tokenizer)
+        },
+        "vllm.inputs": {"tokens_input": lambda ids, **kw: dict(prompt_token_ids=ids, **kw)},
+        "vllm_gr.entrypoints.gr": {"GRLLM": lambda **kwargs: nullcontext(llm)},
+        "vllm_gr.sampling_params": {"BeamSearchParams": SimpleNamespace},
+    }
+    for name, attributes in modules.items():
+        module = ModuleType(name)
+        module.__dict__.update(attributes)
+        monkeypatch.setitem(sys.modules, name, module)
+
+    example.main(quickstart=True)
+    example.main()
+
+    assert submitted[0] == tokens
+    assert submitted[1] == ([42] * max(0, 1023 - length) + tokens[-1023:])
 
 
 pytestmark = pytest.mark.cpu_test

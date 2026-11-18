@@ -66,7 +66,8 @@ python benchmarks/open_one_rec/tools/convert_catalog.py \
 
 ### Notes
 
-- The script reads `sid2pid.json` from `<dataset-path>/sid2pid.json`.
+- The script reads `sid2pid.json` at `<dataset-path>/sid2pid.json`. For
+  OpenOneRec-RecIF, set the dataset path to its `benchmark_data` subdirectory.
 - The script uses only JSON keys from the input map.
 - Each key is decoded using base `8192` into `<s_a_*>`, `<s_b_*>`, `<s_c_*>`.
 - Output format is compatible with catalog files consumed by vllm-gr.

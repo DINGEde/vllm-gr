@@ -31,7 +31,7 @@ The current implementation targets inference scenarios and does not aim for full
 ## Repository Contents
 
 - `vllm_gr/` — GRLLM (offline beam search), beam-search/catalog patches, NPU runtime utils, ops
-- `examples/` — OneRec beam-search and Pangu LLM passthrough offline examples
+- [`examples/`](examples/README.md) — HTTP serving, catalog constraints, and offline inference
 - `tools/` — unified test runner and local development utilities
 - `scripts/` — wheel-build and device lifecycle helpers used by CI
 - `tests/` — unit, contract, and Pangu system tests
@@ -74,15 +74,13 @@ for loading checks and guidance maintenance.
 
 ## Executing
 
-- For the EngineCore-owned asynchronous Beam Search V1 path, start with the
-  [OneRec V1 asynchronous scheduling quickstart](docs/onerec_v1_async_quickstart.md).
-  It gives a beginner-friendly, end-to-end reproduction path; consult the
-  [offline Beam Search examples](examples/offline_inference/beam_search/README.md#beam-search-v1)
-  for the full configuration reference.
-- Please refer to [offline inference](examples/offline_inference/beam_search/README.md) for offline beam search example.
-- Please refer to [online inference](examples/online_serving/beam_search/README.md) for online inference example.
-- For gRPC beam generation with binary token inputs, see the
-  [gRPC and NumPy upgrade guide](docs/grpc_numpy_upgrade.md).
+- [Run OneRec offline](examples/README.md#run-onerec-offline) with a local
+  model snapshot.
+- [Constrain SIDs to a catalog](examples/offline_inference/beam_search/README.md#run-with-a-constraint-table).
+  See the [asynchronous scheduling quickstart](docs/onerec_v1_async_quickstart.md)
+  for the full configuration.
+- [Serve OneRec over HTTP](examples/online_serving/beam_search/README.md) or
+  [gRPC](examples/online_serving/grpc/README.md).
 
 ## NPU Serving
 
@@ -94,8 +92,8 @@ Use a canonical `--vllm-gr-config` file with `beam.execution_mode: v1` and
 same model/tokenizer snapshot used by the server and include the printed
 artifact and tokenizer digests in the configuration.
 
-Follow the [artifact build instructions](examples/offline_inference/beam_search/README.md#constraint-table-artifact),
-then the [online V1 example](examples/online_serving/beam_search/README.md).
+Use the [HTTP example](examples/online_serving/beam_search/README.md) to
+compile the table and verify the deployment.
 The old frontend `--catalog-path` injection flow is retired; a triples JSON
 is an artifact build input, not a replacement for the canonical configuration.
 

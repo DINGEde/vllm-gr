@@ -1,35 +1,30 @@
 # Offline Beam Search Demo
 
-This directory contains a standalone example demonstrating how to run beam search in **offline mode** using the `vllm-gr` framework for generative recommendation models.
+Run `quickstart.py` with a local OneRec model. The script calls
+`GRLLM.beam_search_v1` over the full vocabulary by default. Pass `--catalog`
+to compile a temporary Constraint Table. Run
+`python offline_beam_search_v1.py --help` for the available options.
 
-The entrypoint is `offline_beam_search_v1.py`, the EngineCore-owned
-asynchronous V1 path. The old `offline_beam_search.py` example is retired.
-
-The V1 example accepts a model, Constraint Table triples document, and prompt.
-It compiles a temporary CUDA or NPU Constraint Table artifact, builds the canonical V1
-configuration, calls `GRLLM.beam_search_v1`, and prints the leading Beam results.
-Run `python offline_beam_search_v1.py --help` for its arguments.
-
-New to V1 scheduling? Follow the end-to-end
+Use the [standalone command](#run-the-v1-example) for inference or the
 [OneRec-1.7B asynchronous scheduling quickstart](../../../docs/onerec_v1_async_quickstart.md)
-first; this document is the detailed configuration reference.
+to generate and use a Constraint Table. The legacy `offline_beam_search.py`
+example is retired.
 
 ## Installation
 
-Follow the instructions in  
-[`docs/quickstart.md`](../../../docs/quickstart.md)  
-to install the required dependencies and set up your environment.
+Install `vllm-gr` and its runtime dependencies using
+[`docs/quickstart.md`](../../../docs/quickstart.md).
 
 ## Beam Search V1
 
-Beam Search V1 is the EngineCore-owned asynchronous Beam path. The parameter
-combinations described here follow the working local profiling and A/B scripts.
+EngineCore schedules Beam Search V1 asynchronously. The profiling and A/B
+scripts use the configurations below.
 
 ### Public entrypoint
 
-Use `GRLLM.beam_search_v1()` with `beam.execution_mode: v1`.
-`GRLLM.beam_search()` raises a migration error instead of falling through to
-upstream vLLM's implementation. Legacy frontend step orchestration is retired.
+Set `beam.execution_mode: v1` and call `GRLLM.beam_search_v1()`.
+`GRLLM.beam_search()` raises a migration error. EngineCore now owns scheduling
+for the V1 session.
 
 The V1 flow is:
 
@@ -50,24 +45,28 @@ with an active V1 Beam session.
 
 ### Current restrictions
 
-The constrained example requires:
+Both modes require:
 
-- CUDA or NPU and an enabled canonical Constraint Table matching the device.
+- CUDA or NPU.
 - `async_scheduling=True`.
 - Logical B=1..8 with shared generation parameters; online batch/capture policy
   defaults to `[1, 2, 4]` and must fit engine capacity.
 - TP, PP, DP, DCP, and PCP sizes equal to 1.
 - Request `beam_width == beam.max_width`.
-- Effective generation budget `N=3`, matching the three-layer `constraint_table_v1`.
-  Other lengths are rejected at request ingress.
 - Token/text prompts rather than embedding prompts.
 - No speculative decoding, LoRA, quantization, hybrid model, encoder-decoder
   model, or multimodal model.
-- `catalog_strategy=None`, because the Worker-side table controls validity.
+
+For catalog-constrained generation, pass `--catalog`, set
+`catalog_strategy=None`, and generate exactly three tokens. Without a catalog,
+the engine supports 1 through `beam.max_decode_steps` effective tokens. The
+example CLI accepts 1 to 3.
 
 ### Constraint Table artifact
 
-If the source catalog is not already a triples document, convert it first:
+Use the [OneRec catalog converter](../../../benchmarks/open_one_rec/tools/README.md)
+to generate a catalog JSON from `sid2pid.json`, or supply your own SID sequences
+with begin and end markers. Extract the triples from that catalog.
 
 ```bash
 python tools/build_constraint_triples.py \
@@ -77,9 +76,8 @@ python tools/build_constraint_triples.py \
   --end '<|sid_end|>'
 ```
 
-The standalone `offline_beam_search_v1.py` example accepts this triples document
-and compiles a temporary artifact automatically. For a reusable artifact,
-run:
+`offline_beam_search_v1.py` compiles a temporary table from the triples.
+To save a reusable artifact, run the compiler directly.
 
 ```bash
 python tools/build_constraint_table.py \
@@ -95,9 +93,9 @@ constraint data or a different tokenizer.
 
 ### Engine configuration
 
-The standalone example builds the following CUDA configuration in memory. The
-same mapping can be stored as a YAML file for other applications. For NPU, use
-`constraint_table.backend: npu`:
+With `--catalog`, the script builds the CUDA configuration below in memory.
+Save the same mapping as YAML for other applications. For NPU, set
+`constraint_table.backend: npu`.
 
 ```yaml
 schema_version: 1
@@ -122,14 +120,16 @@ constraint_table:
 
 #### Beam configuration parameters
 
-| Parameter | Meaning | V1 value |
+These values describe the example's CUDA configuration. The CLI flags below
+belong to `offline_beam_search_v1.py`. Library defaults can differ.
+
+| Parameter | Example value | How the example sets it |
 | --- | --- | --- |
-| `execution_mode` | Selects the engine-lifetime Beam interface | `v1` |
-| `graph_enabled` | Enables the fixed-shape Beam CUDA graph | `true` |
-| `worker_decision` | Performs Beam selection on the Worker | `true` |
-| `engine_driven` | Retired input; V1 always owns scheduling | Omit; old `true` warns and is discarded, `false` is rejected |
-| `max_width` | Engine Beam capacity | Same as request `beam_width` |
-| `max_decode_steps` | Startup capacity for effective generation length | Positive integer; at least `3` for this constrained example |
+| `execution_mode` | `v1` | The script selects Beam Search V1. |
+| `graph_enabled` | `true` on CUDA | On Ascend, `--execution graph` enables Beam graphs and `--execution eager` disables them. CUDA ignores this flag. |
+| `worker_decision` | `true` | The script enables Beam selection on the Worker. |
+| `max_width` | `128` | `--beam-width` sets both the engine capacity and the request width. |
+| `max_decode_steps` | `3` | `--generated-steps` sets the effective token count. The three-layer Constraint Table requires `3`. |
 
 On CUDA, with `constrained_generation: false` and
 `constraint_table.enabled: false`, one engine can accept per-request effective
@@ -141,16 +141,19 @@ effective tokens.
 
 #### Constraint Table parameters
 
-| Parameter | Meaning |
-| --- | --- |
-| `enabled` | Must be `true` for V1 |
-| `backend` | `cuda` or `npu`, matching the device |
-| `max_top_k` | Candidate capacity; must be at least the candidate width |
-| `candidate_width` | Candidates per Beam row (1..256); omit to follow the Beam width. Required when the Beam width exceeds 256 |
-| `path` | Constraint Table `.safetensors` artifact |
-| `format` | Must be `constraint_table_v1` |
-| `artifact_digest` | Digest printed by `build_constraint_table.py` |
-| `tokenizer_digest` | Tokenizer digest printed by the same command |
+These values match the CUDA YAML above. With `--catalog`, the offline script
+compiles a temporary artifact and fills in its path and digests.
+
+| Parameter | Example value | How to set it |
+| --- | --- | --- |
+| `enabled` | `true` | The script enables the table when you pass `--catalog`. It uses full-vocabulary Beam Search otherwise. |
+| `backend` | `cuda` | Use `--constraint-backend npu` on Ascend. |
+| `max_top_k` | `128` | The script sets this capacity to the candidate width. In YAML, set it to at least that width. |
+| `candidate_width` | Omitted, resolves to `128` | Use `--candidate-width` to set the candidates per Beam row independently of `--beam-width`. The accepted range is 1 through 256. Set it explicitly when the Beam width exceeds 256. |
+| `path` | `/absolute/path/to/video_constraint_table.safetensors` | In YAML, use the absolute path to the compiled artifact. |
+| `format` | `constraint_table_v1` | Use this format for the three-layer table. |
+| `artifact_digest` | `sha256:REPLACE_WITH_ARTIFACT_DIGEST` | In YAML, substitute the artifact digest printed by `build_constraint_table.py`. |
+| `tokenizer_digest` | `sha256:REPLACE_WITH_TOKENIZER_DIGEST` | In YAML, substitute the tokenizer digest printed by the same command. |
 
 Use an absolute artifact path. Do not combine this canonical configuration with
 legacy `vllm_gr_*` keys in `additional_config`.
@@ -167,33 +170,37 @@ same normalized settings reuse the new cache key.
 
 #### Important `GRLLM` parameters
 
-| Parameter | Purpose |
-| --- | --- |
-| `vllm_gr_config` | Canonical YAML path or equivalent mapping |
-| `async_scheduling` | Required by the V1 EngineCore session path |
-| `enable_prefix_caching` | Allows Prefill prefix reuse; correctness does not depend on it |
-| `enable_chunked_prefill` | The example disables it for a fixed input case |
-| `max_model_len` | Must cover the prompt plus effective generation budget |
-| `max_num_batched_tokens` | Must cover the prompt when chunked Prefill is disabled |
-| `max_num_seqs` | The example sets it to the fixed Beam width |
-| `max_logprobs` | Must be at least the candidate width (`candidate_width`) |
-| `enforce_eager` | `false` allows graph execution |
+These values apply to the single-request CUDA command in
+[Run the V1 example](#run-the-v1-example).
+
+| Parameter | Example value | How the example sets it |
+| --- | --- | --- |
+| `vllm_gr_config` | In-memory mapping | The script builds the mapping from its arguments. The Python API also accepts a YAML path. |
+| `async_scheduling` | `True` | EngineCore requires it for Beam Search V1 sessions. |
+| `enable_prefix_caching` | `True` | Enables Prefill prefix reuse. Correctness is independent of prefix caching. |
+| `enable_chunked_prefill` | `False` | The script processes the complete prompt in Prefill. |
+| `max_model_len` | `8192` | Set with `--max-model-len`. It must cover the prompt and generation budget. |
+| `max_num_batched_tokens` | `8192` | The script uses the larger of `max_model_len` and the batch's Prefill token budget. The full batch must fit when chunked Prefill is disabled. |
+| `max_num_seqs` | `128` | The script uses the larger of `--beam-width` and `--batch-size`. |
+| `max_logprobs` | `128` | The script uses `--candidate-width` when set and `--beam-width` otherwise. |
+| `enforce_eager` | `False` | The script sets it to `True` on Ascend with `--execution eager`. |
 
 ### Request parameters
 
-V1 accepts `vllm_gr.sampling_params.BeamSearchParams`:
+The offline script builds `vllm_gr.sampling_params.BeamSearchParams` with
+these values for the fixed-width example.
 
-| Parameter | Meaning |
-| --- | --- |
-| `beam_width` | Must exactly equal `beam.max_width` |
-| `max_tokens` | Public budget, including configured begin/end positions |
-| `temperature` | Sampling temperature; the example uses `0.0` |
-| `ignore_eos` | Whether stop/EOS tokens are ignored |
-| `include_stop_str_in_output` | Keeps the configured boundary token in public output |
-| `begin_token` | Appended to the prompt before Prefill |
-| `end_token` | Stop boundary or appended to a length-finished result |
-| `length_penalty` | Ranks final candidates of different lengths |
-| `catalog_strategy` | Must remain `None` for this Constraint Table path |
+| Parameter | Example value | How the example sets it |
+| --- | --- | --- |
+| `beam_width` | `128` | Taken from `--beam-width`. It must equal `beam.max_width`. |
+| `max_tokens` | `5` | The script adds two boundary positions to `--generated-steps`. |
+| `temperature` | `0.0` | Fixed by the script for Beam Search. |
+| `ignore_eos` | `True` | Ignores stop and EOS tokens during the fixed-length search. |
+| `include_stop_str_in_output` | `True` | Keeps the configured boundary token in the returned sequence. |
+| `begin_token` | `<\|sid_begin\|>` | The script configures it as the marker appended to the prompt before Prefill. |
+| `end_token` | `<\|sid_end\|>` | Marks a stop boundary or is appended when the result reaches its length limit. |
+| `length_penalty` | `1.0` | Set with `--length-penalty`. It affects ranking for candidates of different lengths. |
+| `catalog_strategy` | `None` | Keep this value when using the Constraint Table. |
 
 The effective generation budget is:
 
@@ -206,45 +213,70 @@ tokens and an effective V1 budget of 3.
 
 ### Run the V1 example
 
-The standalone example compiles a temporary Constraint Table, constructs the V1
-engine configuration, calls `GRLLM.beam_search_v1`, and prints the leading Beam
-results:
+Run from the repository root with a local OneRec snapshot and tokenizer.
+On CUDA, the script defaults to ModelRunner V2.
 
 ```bash
-CUDA_VISIBLE_DEVICES=0 python offline_beam_search_v1.py \
-  --model /path/to/OneRec-1.7B \
-  --catalog /path/to/video_constraint_triples.json \
-  --prompt /path/to/prompt.txt \
-  --input-len 1024 \
-  --generated-steps 3 \
-  --beam-width 128
+python examples/offline_inference/beam_search/quickstart.py \
+  --model /path/to/OneRec-1.7B
 ```
 
-Run `python offline_beam_search_v1.py --help` to see optional memory, length
-penalty, output-count, and measurement arguments.
+On Ascend, add `--constraint-backend npu --execution eager`. Ascend uses
+ModelRunner V1. See [ModelRunner selection](../../README.md#choose-a-modelrunner)
+for the CUDA override.
 
-This constrained example accepts only `--generated-steps 3` and rejects `1` or
-`2` during argument validation, before model loading or artifact construction.
-On NPU, this runs Prefill followed by two Decode stages and requires the
-requested Beam graph shape to be captured and replayed in graph mode. The `fallbacks`
-counter means Beam FULL graph was not used: native FULL is rejected, while
-native PIECEWISE/NONE is retained. It does not count exclusively eager forwards.
+The default run prints `request=0 returned_beams=128`, followed by five JSON
+rows with scores and `beam_tokens`, including the OneRec boundary markers.
+`--beam-width` sets the maximum number of beams retained at each step in
+this fixed-width search. `--print-beams` caps the number of result rows printed
+per request. To show only the top candidate, pass `--print-beams 1`.
+
+The default prompt is `Recommend the next video.` Pass
+`--prompt /path/to/prompt.txt` to read UTF-8 input. The quickstart encodes the
+full prompt at its natural length. Use `offline_beam_search_v1.py --input-len 1024`
+for fixed-length benchmark inputs. Full-vocabulary search can
+return invalid SIDs. Use a [Constraint Table](#run-with-a-constraint-table)
+to restrict output to your catalog. Run with `--help` for the remaining options.
+
+Full-vocabulary Beam Search accepts 1 to 3 generated steps in this example.
+With three steps, the NPU run performs Prefill followed by two
+Decode stages. Graph mode checks that the requested Beam graph shape was
+captured and replayed. The `fallbacks` counter records dispatches that did not
+use Beam FULL graphs, including dispatches on the native PIECEWISE path.
+
+### Run with a Constraint Table
+
+Generate triples JSON from your item catalog using the
+[catalog conversion commands](../../online_serving/catalog/README.md#compile-the-constraint-table).
+For offline inference, the first two commands produce the triples JSON.
+Pass that file with `--catalog` and the script will compile the table with the
+inference model's tokenizer.
+
+```bash
+python examples/offline_inference/beam_search/offline_beam_search_v1.py \
+  --model /path/to/OneRec-1.7B \
+  --catalog /path/to/constraint_triples.json
+```
+
+On Ascend, add `--constraint-backend npu --execution eager`.
+
+This mode requires three generated steps and prints `sid_tokens`. A small
+catalog may have too few reachable candidates to fill `--beam-width`.
+Use `--print-beams` to limit the rows shown.
 
 ### Optional thinking before SID generation
 
-The same `--prompt` file can be used in three modes:
+The same `--prompt` file can be used in three modes.
 
 | Options | Execution |
 | --- | --- |
-| Neither thinking flag | Existing direct constrained SID Beam Search |
+| Neither thinking flag | Direct Beam Search, with a Constraint Table if `--catalog` is provided |
 | `--enable-thinking` | Ordinary full-vocabulary LLM generation only; no catalog or SID Beam phase |
 | `--cot` | Ordinary thinking generation, followed by constrained SID Beam Search |
 
-`--cot` and `--enable-thinking` are mutually exclusive. Both require a model
-that supports the requested thinking behavior. The combined mode also requires
-dedicated `<think>` and `</think>` tokenizer tokens and a compatible SID catalog.
-It exposes a checkpoint's capabilities; it does not add reasoning proficiency
-to a checkpoint that was not trained for it.
+Choose either `--cot` or `--enable-thinking` with a checkpoint that
+supports thinking. The combined mode also requires dedicated `<think>` and `</think>`
+tokenizer tokens and a compatible SID catalog.
 
 #### NPU setup and commands
 
@@ -263,7 +295,6 @@ export VLLM_USE_V2_MODEL_RUNNER=0
 export USE_TF=0
 
 MODEL=/absolute/path/to/OneRec_Qwen3_1.7B
-CATALOG=tools/AB_Tests/constraints/video_constraint_triples.json
 PROMPT=/absolute/path/to/recommendation_prompt.txt
 BATCH_SIZE=1
 mkdir -p results/cot
@@ -274,11 +305,11 @@ Set `BATCH_SIZE=4` to run four requests instead. This CLI repeats the supplied
 input for each row, with independent row cache salts in the combined workflow.
 It does not accept a separate thinking prompt.
 
-Direct SID Beam Search, with the existing fixed-length input preparation:
+Direct full-vocabulary Beam Search uses fixed-length input preparation.
 
 ```bash
 python -u examples/offline_inference/beam_search/offline_beam_search_v1.py \
-  --model "$MODEL" --catalog "$CATALOG" --prompt "$PROMPT" \
+  --model "$MODEL" --prompt "$PROMPT" \
   --constraint-backend npu --execution eager \
   --batch-size "$BATCH_SIZE" --beam-width 128 \
   --input-len 128 --generated-steps 3 --print-beams 5
@@ -299,11 +330,13 @@ python -u examples/offline_inference/beam_search/offline_beam_search_v1.py \
   --output-json "results/cot/thinking_b${BATCH_SIZE}.json"
 ```
 
-Thinking followed by SID Beam Search:
+Thinking followed by constrained SID Beam Search requires triples built from
+your own catalog using the [Constraint Table instructions](#constraint-table-artifact).
 
 ```bash
+ONEREC_TRIPLES=/absolute/path/to/constraint_triples.json
 python -u examples/offline_inference/beam_search/offline_beam_search_v1.py \
-  --model "$MODEL" --catalog "$CATALOG" --prompt "$PROMPT" \
+  --model "$MODEL" --catalog "$ONEREC_TRIPLES" --prompt "$PROMPT" \
   --constraint-backend npu --execution eager \
   --batch-size "$BATCH_SIZE" --beam-width 128 --generated-steps 3 \
   --cot --cot-max-tokens 1024 --max-model-len 8192 \
@@ -313,7 +346,9 @@ python -u examples/offline_inference/beam_search/offline_beam_search_v1.py \
 
 #### Input, budget and handoff contract
 
-Both thinking modes retain the complete input and ignore `--input-len`. Plain
+Both thinking modes retain the complete input and ignore `--input-len`.
+Thinking-only mode also ignores `--catalog` and prints a notice when it is
+supplied. The CoT mode uses the catalog for its SID generation stage. Plain
 input uses the model's chat template. If that template emits a terminal empty
 `<think>...</think>` span, both modes reopen it without changing earlier token
 IDs. Thinking-only otherwise retains the template's output; the combined CoT
@@ -456,20 +491,17 @@ inspection, statistics collection and printing are excluded. Work performed
 inside the API is included. `--repeat` cannot be combined with `--profile-dir`.
 Without either option, the script still runs one batch.
 
-For NPU graph B=1/2/4, run this loop from the repository root. Each B starts a
-separate engine and captures its own fixed `(B, W)` shape. Set `CATALOG` to
-the triples JSON prepared in [Constraint Table artifact](#constraint-table-artifact).
+From the repository root, run the NPU graph benchmark for B=1/2/4. Each
+invocation starts a full-vocabulary engine and captures a fixed `(B, W)` shape.
 
 ```bash
 set -o pipefail
 export PYTHONPATH="$PWD${PYTHONPATH:+:$PYTHONPATH}"
-CATALOG=/absolute/path/to/constraint_triples.json
 BENCH_RUN="$PWD/test-results/graph_latency_$(date +%Y%m%d_%H%M%S)"
 mkdir -p "$BENCH_RUN"
 for B in 1 2 4; do
   python -u examples/offline_inference/beam_search/offline_beam_search_v1.py \
     --model /path/to/OneRec_Qwen3_1.7B \
-    --catalog "$CATALOG" \
     --prompt tests/resources/single_one_rec_prompt.txt \
     --constraint-backend npu --execution graph \
     --batch-size "$B" --beam-width 128 --input-len 128 \
@@ -644,17 +676,15 @@ configured or started; use `--repeat` for separate latency measurements.
 - Stack, shape and memory recording are disabled to reduce profiling overhead.
   Traces cover the Worker rather than the frontend, and are not gzip compressed.
 
-For NPU B=2/W=128, run from the repository root:
+For NPU B=2/W=128, run full-vocabulary Beam Search from the repository root.
 
 ```bash
 set -o pipefail
 export PYTHONPATH="$PWD${PYTHONPATH:+:$PYTHONPATH}"
-CATALOG=/absolute/path/to/constraint_triples.json
 PROFILE_RUN="$PWD/test-results/bs2_bw128_profile_$(date +%Y%m%d_%H%M%S)"
 mkdir -p "$PROFILE_RUN/logs"
 python -u examples/offline_inference/beam_search/offline_beam_search_v1.py \
   --model /path/to/OneRec_Qwen3_1.7B \
-  --catalog "$CATALOG" \
   --prompt tests/resources/single_one_rec_prompt.txt \
   --constraint-backend npu --execution graph \
   --batch-size 2 --beam-width 128 --input-len 128 \
@@ -697,8 +727,8 @@ step, selection completes in Prefill and no Decode replay is required.
 
 Run the following blocks from the repository root in the same Bash shell.
 Replace `MODEL` with the installed model directory and choose the visible NPU
-card for the run. The catalog and prompt below are tracked repository resources;
-the catalog tokens must match the selected model's tokenizer.
+card for the run. The commands use full-vocabulary Beam Search with the tracked
+prompt.
 
 ```bash
 set -o pipefail
@@ -706,7 +736,6 @@ export PYTHONPATH="$PWD${PYTHONPATH:+:$PYTHONPATH}"
 export ASCEND_RT_VISIBLE_DEVICES=0
 export VLLM_ENABLE_PREFILL_CUDAGRAPH=0
 MODEL=/absolute/path/to/Qwen3-0.6B-OneRecVocab
-CATALOG=tools/AB_Tests/constraints/video_constraint_triples.json
 PROMPT=tests/resources/single_one_rec_prompt.txt
 DYNAMIC_RUN="$PWD/test-results/npu_dynamic_beam_$(date +%Y%m%d_%H%M%S)"
 mkdir -p "$DYNAMIC_RUN/logs" "$DYNAMIC_RUN/json" "$DYNAMIC_RUN/profile"
@@ -724,13 +753,14 @@ These commands time 20 complete batches after three untimed warmups. They use
 N=3 with the script's existing begin/end boundaries (`max_tokens=5`), capacity
 128, the `128,64,32` schedule and R=32. `--input-len 128` includes the BEGIN token
 appended by the API. All batch rows use the same prepared prompt with independent
-cache salts; each timed call includes Prefill.
+cache salts. Each timed call includes Prefill. Leave `--candidate-width` unset
+so the NPU full-vocabulary selector uses each stage's beam width.
 
 B=1:
 
 ```bash
 python -u examples/offline_inference/beam_search/offline_beam_search_v1.py \
-  --model "$MODEL" --catalog "$CATALOG" --prompt "$PROMPT" \
+  --model "$MODEL" --prompt "$PROMPT" \
   --constraint-backend npu --execution graph \
   --batch-size 1 --beam-width 128 --input-len 128 --generated-steps 3 \
   --dynamic-beam-widths 128,64,32 --result-width 32 --print-beams 5 \
@@ -743,7 +773,7 @@ B=4:
 
 ```bash
 python -u examples/offline_inference/beam_search/offline_beam_search_v1.py \
-  --model "$MODEL" --catalog "$CATALOG" --prompt "$PROMPT" \
+  --model "$MODEL" --prompt "$PROMPT" \
   --constraint-backend npu --execution graph \
   --batch-size 4 --beam-width 128 --input-len 128 --generated-steps 3 \
   --dynamic-beam-widths 128,64,32 --result-width 32 --print-beams 5 \
@@ -771,7 +801,7 @@ B=1:
 
 ```bash
 python -u examples/offline_inference/beam_search/offline_beam_search_v1.py \
-  --model "$MODEL" --catalog "$CATALOG" --prompt "$PROMPT" \
+  --model "$MODEL" --prompt "$PROMPT" \
   --constraint-backend npu --execution graph \
   --batch-size 1 --beam-width 128 --input-len 128 --generated-steps 3 \
   --dynamic-beam-widths 128,64,32 --result-width 32 --print-beams 5 \
@@ -784,7 +814,7 @@ B=4:
 
 ```bash
 python -u examples/offline_inference/beam_search/offline_beam_search_v1.py \
-  --model "$MODEL" --catalog "$CATALOG" --prompt "$PROMPT" \
+  --model "$MODEL" --prompt "$PROMPT" \
   --constraint-backend npu --execution graph \
   --batch-size 4 --beam-width 128 --input-len 128 --generated-steps 3 \
   --dynamic-beam-widths 128,64,32 --result-width 32 --print-beams 5 \
@@ -806,7 +836,7 @@ setup:
 
 ```bash
 python -u examples/offline_inference/beam_search/offline_beam_search_v1.py \
-  --model "$MODEL" --catalog "$CATALOG" --prompt "$PROMPT" \
+  --model "$MODEL" --prompt "$PROMPT" \
   --constraint-backend npu --execution eager \
   --batch-size 1 --beam-width 256 --input-len 128 --generated-steps 3 \
   --dynamic-beam-widths 32,64,256 --result-width 32 --print-beams 5 \
@@ -817,14 +847,13 @@ python -u examples/offline_inference/beam_search/offline_beam_search_v1.py \
 
 Its Decode input widths are 32 and 64; this eager example does not request Beam
 graph capture. The final stage may retain up to 256 candidates, while the API
-returns at most 32 per request. Expanding a later width cannot recover SA/SB prefixes pruned by
-an earlier stage. A wider final stage is not a guarantee of baseline search
-quality or of R legal final paths.
+returns at most 32 per request. Expanding a later width cannot recover prefixes
+pruned by an earlier stage. A wider final stage can change the results.
 
 #### Benchmark JSON and returned-result metadata
 
-The `beam_benchmark` JSON log and `--output-json` file use the same benchmark
-payload. The new fields are emitted only when explicitly supplied:
+The `beam_benchmark` JSON log and `--output-json` file contain the same
+measurements and configuration. Optional schedule fields appear only when set.
 
 | Field | Meaning |
 | --- | --- |
@@ -832,6 +861,7 @@ payload. The new fields are emitted only when explicitly supplied:
 | `dynamic_beam_widths` | Parsed retained widths, e.g. `[128, 64, 32]`; absent for an omitted schedule |
 | `result_width` | Explicit R; absent when omitted, in which case derive the default from the final width |
 | `batch_size`, `input_len`, `generated_steps` | Input and generation conditions |
+| `catalog` | Triples input path or `null` for full-vocabulary Beam Search |
 | `repeat`, `warmup_runs` | Measured and untimed batch counts |
 | `batch_latency_ms` | Mean, P50, P95, min and max batch API latency |
 | `runs[].returned_beams` | Actual total valid Beams returned across the whole batch in that run |
@@ -843,23 +873,10 @@ The benchmark JSON contains conditions and timing/count metadata; it is not a
 serialized list of result sequences. Standard output separately prints
 `request=... returned_beams=...` for each request in the last batch, followed by
 up to `--print-beams` JSON records containing `request`, `rank`,
-`cumulative_logprob`, `finish_reason`, `stop_reason`, `sid_token_ids`, and
-`sid_tokens`. Printing fewer ranks does not reduce the recorded actual return
-counts. The SID fields are the script's trailing generated/boundary token slice.
+`cumulative_logprob`, `finish_reason` and `stop_reason`. The records include
+`beam_token_ids` and `beam_tokens` by default. With `--catalog`, those fields
+are named `sid_token_ids` and `sid_tokens`. Both include the generated tokens
+and OneRec boundaries. Printing fewer ranks leaves the return counts intact.
 
-Compare latency only with matching model/catalog/prompt, device, B, capacity,
-input length, return limit, Prefill setting and measurement setup. Keep search
-quality and the existing NPU legal-set score contract separate from performance
-claims.
-
-### Retired scheduling control
-
-`beam.engine_driven`, `vllm_gr_beam_engine_driven`, the Python
-`beam_engine_driven` argument, and `--beam-engine-driven` no longer select an
-execution path. Omit them. For migration, `true` is accepted with a warning
-and discarded; `false` / `--no-beam-engine-driven` is rejected because the
-frontend step loop no longer exists. Null remains equivalent to omission.
-The accepted legacy boolean strings follow the same rules; other types and
-invalid strings fail validation. This option is never serialized to workers
-or auto-enabled by platform defaults. `worker_decision` remains a separate
-control, and an explicit False value is still preserved.
+Compare latency only with matching model, prompt, constraint settings, device,
+B, capacity, input length, return limit, Prefill setting and measurement setup.

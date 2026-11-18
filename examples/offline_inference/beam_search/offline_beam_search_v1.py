@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM-GR project
-"""Run offline SID Beam Search, optionally after thinking on the same input."""
+"""Run offline OneRec Beam Search, with an optional Constraint Table."""
 
 from __future__ import annotations
 
 import argparse
 import json
 import os
+import sys
 import tempfile
 from pathlib import Path
 from statistics import mean
@@ -21,27 +22,32 @@ os.environ.setdefault("USE_TF", "0")
 
 BEGIN_TOKEN = "<|sid_begin|>"
 END_TOKEN = "<|sid_end|>"
+DEFAULT_PROMPT = "Recommend the next video."
 
 
-def parse_args() -> argparse.Namespace:
+def parse_args(*, quickstart: bool = False) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--model", type=Path, required=True)
     parser.add_argument(
         "--catalog",
         type=Path,
-        help="Constraint triples JSON; required for Beam, unused with --enable-thinking",
+        help="Enable a Constraint Table from triples JSON (required only with --cot)",
     )
     parser.add_argument(
         "--constraint-backend",
         choices=("cuda", "npu"),
         default="cuda",
-        help="Constraint Table device backend (CUDA or NPU)",
+        help="Device backend for the Beam example (CUDA or NPU)",
     )
-    parser.add_argument("--prompt", type=Path, required=True)
+    parser.add_argument(
+        "--prompt",
+        type=Path,
+        help=f'UTF-8 prompt file (default: "{DEFAULT_PROMPT}"; required for thinking modes)',
+    )
     parser.add_argument(
         "--enable-thinking",
         action="store_true",
-        help="Run ordinary LLM thinking instead of constrained Beam SID generation",
+        help="Run ordinary LLM thinking instead of Beam Search",
     )
     parser.add_argument(
         "--cot",
@@ -73,7 +79,12 @@ def parse_args() -> argparse.Namespace:
         default="eager",
         help="NPU Decode execution mode; CUDA keeps its existing graph behavior",
     )
-    parser.add_argument("--input-len", type=int, default=1024)
+    parser.add_argument(
+        "--input-len",
+        type=int,
+        default=None if quickstart else 1024,
+        help="Fixed prompt length including the SID begin token (optional in the quickstart)",
+    )
     parser.add_argument(
         "--generated-steps",
         type=int,
@@ -132,13 +143,15 @@ def parse_args() -> argparse.Namespace:
         parser.error("--cot and --enable-thinking are separate modes; choose one")
     if args.cot and args.cot_max_tokens <= 0:
         parser.error("--cot-max-tokens must be positive")
-    if not args.enable_thinking and args.catalog is None:
-        parser.error("--catalog is required unless --enable-thinking is set")
-    if not args.enable_thinking and args.generated_steps != 3:
+    if args.cot and args.catalog is None:
+        parser.error("--cot requires --catalog for constrained SID generation")
+    if args.catalog is not None and not args.enable_thinking and args.generated_steps != 3:
         parser.error(
             "constrained Beam requires --generated-steps 3 to match constraint_table_v1 depth"
         )
     if args.enable_thinking or args.cot:
+        if args.prompt is None:
+            parser.error("--prompt is required with --enable-thinking or --cot")
         if args.enable_thinking and (
             args.dynamic_beam_widths is not None or args.result_width is not None
         ):
@@ -342,8 +355,8 @@ def benchmark_beam_search(
     total_seconds = sum(latencies_ms) / 1000.0
     report: dict[str, Any] = {
         "model": str(args.model.resolve()),
-        "catalog": str(args.catalog.resolve()),
-        "prompt": str(args.prompt.resolve()),
+        "catalog": str(args.catalog.resolve()) if args.catalog is not None else None,
+        "prompt": str(args.prompt.resolve()) if args.prompt is not None else None,
         "constraint_backend": args.constraint_backend,
         "execution": args.execution,
         "batch_size": args.batch_size,
@@ -452,12 +465,16 @@ def build_artifact(
     return artifact_digest, tokenizer_digest
 
 
-def make_prompt(tokenizer: Any, path: Path, input_len: int) -> list[int]:
+def make_prompt(tokenizer: Any, path: Path | None, input_len: int | None) -> list[int]:
+    text = DEFAULT_PROMPT if path is None else path.read_text(encoding="utf-8")
+    source = tokenizer.encode(text, add_special_tokens=False)
+    if input_len is None:
+        return [int(token) for token in source]
+
     # input_len includes the begin token appended by beam_search_v1.
     submitted_len = input_len - 1
     if submitted_len <= 0:
         raise ValueError("--input-len must be at least 2")
-    source = tokenizer.encode(path.read_text(encoding="utf-8"), add_special_tokens=False)
     if len(source) >= submitted_len:
         return [int(token) for token in source[-submitted_len:]]
     newline = tokenizer.encode("\n", add_special_tokens=False)
@@ -707,7 +724,7 @@ def run_thinking(args: argparse.Namespace) -> None:
         print(f"thinking_json={output_path}")
 
 
-def run(args: argparse.Namespace, artifact_path: Path) -> None:
+def run(args: argparse.Namespace, artifact_path: Path | None = None) -> None:
     from vllm.inputs import tokens_input
 
     from vllm_gr.entrypoints.gr import GRLLM
@@ -717,29 +734,55 @@ def run(args: argparse.Namespace, artifact_path: Path) -> None:
     # Candidate width K is the per-row top-k; None means it follows the beam
     # width (the pre-decoupling behaviour).
     candidate_width = args.candidate_width if args.candidate_width is not None else args.beam_width
-    cot_prompt_ids = None
-    prefill_capacity = args.batch_size * (args.input_len + 1)
+    prompt_token_ids = None
     if getattr(args, "cot", False):
         from transformers import AutoTokenizer
 
         tokenizer = AutoTokenizer.from_pretrained(str(args.model.resolve()), trust_remote_code=True)
-        cot_prompt_ids = make_cot_prompt(tokenizer, args.prompt.resolve())
+        prompt_token_ids = make_cot_prompt(tokenizer, args.prompt.resolve())
         separator_len = len(tokenizer.encode("\n\n", add_special_tokens=False))
         forced_close_reserve = int(args.cot_on_limit == "truncate")
         longest_prompt = (
-            len(cot_prompt_ids) + args.cot_max_tokens + forced_close_reserve + separator_len + 1
+            len(prompt_token_ids) + args.cot_max_tokens + forced_close_reserve + separator_len + 1
         )
         if longest_prompt + args.generated_steps + 1 > args.max_model_len:
             raise ValueError(
                 "full prompt plus --cot-max-tokens and SID budget exceeds --max-model-len"
             )
         prefill_capacity = args.batch_size * longest_prompt
+    elif args.input_len is None:
+        from transformers import AutoTokenizer
 
-    artifact_digest, tokenizer_digest = build_artifact(
-        args.model.resolve(),
-        args.catalog.resolve(),
-        artifact_path,
-    )
+        tokenizer = AutoTokenizer.from_pretrained(str(args.model.resolve()), trust_remote_code=True)
+        prompt_token_ids = make_prompt(tokenizer, args.prompt, None)
+        # Reserve both SID boundary positions and all generated SID components.
+        prompt_limit = args.max_model_len - args.generated_steps - 2
+        if len(prompt_token_ids) > prompt_limit:
+            raise ValueError(
+                f"prompt has {len(prompt_token_ids)} tokens, but only {prompt_limit} fit "
+                f"within --max-model-len {args.max_model_len} with the SID budget"
+            )
+        prefill_capacity = args.batch_size * (len(prompt_token_ids) + 2)
+    else:
+        prefill_capacity = args.batch_size * (args.input_len + 1)
+
+    table_config: dict[str, Any] = {
+        "enabled": args.catalog is not None,
+        "backend": args.constraint_backend,
+        "max_top_k": candidate_width,
+    }
+    if args.catalog is not None:
+        if artifact_path is None:
+            raise ValueError("artifact_path is required with --catalog")
+        artifact_digest, tokenizer_digest = build_artifact(
+            args.model.resolve(), args.catalog.resolve(), artifact_path
+        )
+        table_config.update(
+            path=str(artifact_path),
+            format="constraint_table_v1",
+            artifact_digest=artifact_digest,
+            tokenizer_digest=tokenizer_digest,
+        )
     beam_config: dict[str, object] = {
         "execution_mode": "v1",
         "graph_enabled": not is_npu or args.execution == "graph",
@@ -752,23 +795,17 @@ def run(args: argparse.Namespace, artifact_path: Path) -> None:
         "schema_version": 1,
         "attention_backend": "CUSTOM",
         "beam": beam_config,
-        "constraint_table": {
-            "enabled": True,
-            "backend": args.constraint_backend,
-            "max_top_k": candidate_width,
-            "path": str(artifact_path),
-            "format": "constraint_table_v1",
-            "artifact_digest": artifact_digest,
-            "tokenizer_digest": tokenizer_digest,
-        },
+        "constraint_table": table_config,
     }
+    if args.catalog is None:
+        vllm_gr_config["constrained_generation"] = False
     dynamic_widths = getattr(args, "dynamic_beam_widths", None)
     result_width = getattr(args, "result_width", None)
     if dynamic_widths is not None and len(dynamic_widths) > 1:
         beam_config["graph_widths"] = sorted(set(dynamic_widths[:-1]))
     if args.candidate_width is not None:
         # Omitted means K == beam_width; state it explicitly when decoupled.
-        vllm_gr_config["constraint_table"]["candidate_width"] = args.candidate_width
+        table_config["candidate_width"] = args.candidate_width
     params = BeamSearchParams(
         beam_width=args.beam_width,
         dynamic_beam_widths=dynamic_widths,
@@ -801,11 +838,11 @@ def run(args: argparse.Namespace, artifact_path: Path) -> None:
         **profiler_engine_kwargs(args),
     ) as llm:
         tokenizer = llm.get_tokenizer()
-        if cot_prompt_ids is not None:
-            prompt_token_ids = cot_prompt_ids
+        if getattr(args, "cot", False):
+            assert prompt_token_ids is not None
             print(f"mode=cot_beam input_tokens={len(prompt_token_ids)}; --input-len is not used")
-        else:
-            prompt_token_ids = make_prompt(tokenizer, args.prompt.resolve(), args.input_len)
+        elif prompt_token_ids is None:
+            prompt_token_ids = make_prompt(tokenizer, args.prompt, args.input_len)
         # Keep prefix caching enabled, but prevent duplicate batch rows from
         # sharing the same prompt block before their atomic Prefill completes.
         request_prompts = [
@@ -857,12 +894,13 @@ def run(args: argparse.Namespace, artifact_path: Path) -> None:
                 )
                 print(f"benchmark_json={output_path}")
 
+        token_field = "sid" if args.catalog is not None else "beam"
         for request_index, output in enumerate(outputs):
             sequences = output.sequences
             print(f"request={request_index} returned_beams={len(sequences)}")
             for rank, sequence in enumerate(sequences[: args.print_beams]):
                 token_ids = [int(token) for token in sequence.tokens]
-                sid_token_ids = token_ids[-(args.generated_steps + 2) :]
+                beam_token_ids = token_ids[-(args.generated_steps + 2) :]
                 print(
                     json.dumps(
                         {
@@ -871,8 +909,10 @@ def run(args: argparse.Namespace, artifact_path: Path) -> None:
                             "cumulative_logprob": float(sequence.cum_logprob),
                             "finish_reason": sequence.finish_reason,
                             "stop_reason": sequence.stop_reason,
-                            "sid_token_ids": sid_token_ids,
-                            "sid_tokens": tokenizer.convert_ids_to_tokens(sid_token_ids),
+                            f"{token_field}_token_ids": beam_token_ids,
+                            f"{token_field}_tokens": tokenizer.convert_ids_to_tokens(
+                                beam_token_ids
+                            ),
                         },
                         ensure_ascii=False,
                     )
@@ -897,25 +937,39 @@ def run(args: argparse.Namespace, artifact_path: Path) -> None:
             )
 
 
-def main() -> None:
-    args = parse_args()
-    paths = (
-        (args.model, args.prompt)
-        if args.enable_thinking
-        else (args.model, args.catalog, args.prompt)
-    )
+def main(*, quickstart: bool = False) -> None:
+    args = parse_args(quickstart=True) if quickstart else parse_args()
+    paths = [args.model]
+    if args.prompt is not None:
+        paths.append(args.prompt)
+    if args.catalog is not None and not args.enable_thinking:
+        paths.append(args.catalog)
     for path in paths:
         if not path.exists():
             raise FileNotFoundError(path)
     if args.batch_size <= 0:
         raise ValueError("--batch-size must be positive")
+    if args.constraint_backend == "npu":
+        os.environ["VLLM_USE_V2_MODEL_RUNNER"] = "0"
+    elif not (args.enable_thinking or args.cot) and not os.environ.get("VLLM_USE_V2_MODEL_RUNNER"):
+        os.environ["VLLM_USE_V2_MODEL_RUNNER"] = "1"
     if args.enable_thinking:
+        if args.catalog is not None:
+            print("--catalog is ignored in --enable-thinking mode", file=sys.stderr)
         run_thinking(args)
         return
-    if not args.cot and args.input_len + args.generated_steps + 1 > args.max_model_len:
+    if (
+        not args.cot
+        and args.input_len is not None
+        and args.input_len + args.generated_steps + 1 > args.max_model_len
+    ):
         raise ValueError("prompt and generated tokens exceed --max-model-len")
     if args.print_beams <= 0:
         raise ValueError("--print-beams must be positive")
+
+    if args.catalog is None:
+        run(args)
+        return
 
     with tempfile.TemporaryDirectory(prefix="vllm-gr-beam-v1-") as directory:
         artifact_path = Path(directory).resolve() / "constraint_table.safetensors"

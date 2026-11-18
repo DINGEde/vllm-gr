@@ -1,13 +1,9 @@
 # OneRec-1.7B V1 asynchronous scheduling quickstart
 
-This guide runs the new EngineCore-owned asynchronous Beam Search V1 path
-with OneRec-1.7B. One offline request exercises Prefill, asynchronous Decode,
-GPU Beam decisions, and the CUDA Constraint Table. Keep the values in this
-guide unchanged for the first run.
-
-> This reproduction uses offline `GRLLM.beam_search_v1()`. Online requests
-> also use V1; see the [online serving example](../examples/online_serving/beam_search/README.md)
-> for the matching canonical configuration and server command.
+The offline `GRLLM.beam_search_v1()` request exercises EngineCore scheduling
+with OneRec-1.7B, including Prefill, asynchronous Decode, and GPU Beam selection
+with a CUDA Constraint Table. For the V1 server command and configuration, see
+the [online serving example](../examples/online_serving/beam_search/README.md).
 
 ## 1. Check the environment
 
@@ -30,28 +26,34 @@ export ONEREC_WORKDIR="$PWD/results/onerec-v1"
 mkdir -p "$ONEREC_WORKDIR"
 ```
 
-`ONEREC_DATA` must contain `sid2pid.json`. See the
-[OneRec dataset instructions](benchmarks/README.md#open-one-rec-benchmark-dataset).
-Use the same model and tokenizer version when building the Constraint Table.
+`ONEREC_DATA` is the dataset root, which contains
+`benchmark_data/sid2pid.json`. Build the Constraint Table with the model
+snapshot, including the tokenizer, that you will use for inference.
 
-If the model and dataset are not available locally, accept the required access
-terms on Hugging Face and sign in first. Then download them, reserving enough
-disk space for the dataset:
+To obtain the model snapshot, use the Hugging Face CLI.
 
 ```bash
-huggingface-cli download OpenOneRec/OneRec-1.7B --local-dir "$ONEREC_MODEL"
-git lfs install
-git clone https://huggingface.co/datasets/OpenOneRec/OpenOneRec-RecIF "$ONEREC_DATA"
+hf download OpenOneRec/OneRec-1.7B --local-dir "$ONEREC_MODEL"
+```
+
+Accept the terms on the
+[OpenOneRec-RecIF dataset page](https://huggingface.co/datasets/OpenOneRec/OpenOneRec-RecIF)
+before downloading the catalog mapping.
+
+```bash
+hf auth login
+hf download OpenOneRec/OpenOneRec-RecIF benchmark_data/sid2pid.json \
+  --repo-type dataset --local-dir "$ONEREC_DATA"
 ```
 
 ## 2. Build the V1 Constraint Table inputs
 
-V1 uses a CUDA Constraint Table rather than a plain catalog JSON. Convert
-`sid2pid.json` to a SID catalog, then create the triples document:
+Convert `sid2pid.json` to a SID catalog, then extract the triples used to
+compile the CUDA Constraint Table.
 
 ```bash
 python benchmarks/open_one_rec/tools/convert_catalog.py \
-  --dataset-path "$ONEREC_DATA" \
+  --dataset-path "$ONEREC_DATA/benchmark_data" \
   --output-path "$ONEREC_WORKDIR/video_catalog.json"
 
 python tools/build_constraint_triples.py \
@@ -111,8 +113,7 @@ do not use one fixed score as the pass condition.
 
 ## 4. Why these values are fixed
 
-The new scheduler has an execution contract, rather than being a performance
-switch for arbitrary requests. Keep these values for the first reproduction:
+Use these settings for the initial request.
 
 | Setting | First-run value | Reason |
 | --- | ---: | --- |
