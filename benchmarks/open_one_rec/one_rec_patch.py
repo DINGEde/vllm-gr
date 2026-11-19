@@ -34,6 +34,7 @@ from vllm.benchmarks.throughput import get_requests as original_get_requests
 from vllm.benchmarks.throughput import main as original_main
 from vllm.benchmarks.throughput import validate_args as original_validate_args
 
+from benchmarks.open_one_rec.chat import messages_for_prompt, text_from_message
 from benchmarks.open_one_rec.open_one_rec_dataset import OneRecDataset
 
 # ============================================================================
@@ -245,7 +246,12 @@ async def patched_async_request_openai_chat_completions(
     api_url = request_func_input.api_url
     _validate_api_url(api_url, "OpenAI Chat Completions API", "chat/completions")
 
-    content = _get_chat_content(request_func_input, mm_position=mm_position)
+    chat_messages = request_func_input.chat_messages
+    content = (
+        _get_chat_content(request_func_input, mm_position=mm_position)
+        if chat_messages is None
+        else None
+    )
     temperature = 0.0
     if hasattr(request_func_input, "temperature") and request_func_input.temperature is not None:
         temperature = request_func_input.temperature
@@ -259,9 +265,7 @@ async def patched_async_request_openai_chat_completions(
         "model": request_func_input.model_name
         if request_func_input.model_name
         else request_func_input.model,
-        "messages": [
-            {"role": "user", "content": content},
-        ],
+        "messages": messages_for_prompt(content, chat_messages, parse_transcript=False),
         "use_beam_search": request_func_input.use_beam_search,
         "n": request_func_input.n,
         "temperature": temperature,
@@ -284,10 +288,9 @@ async def patched_async_request_openai_chat_completions(
     output.prompt_len = request_func_input.prompt_len
 
     generated_text = ""
-    ttft = 0.0
+    last_text_timestamp: float | None = None
     st = time.perf_counter()
     output.start_time = st
-    most_recent_timestamp = st
     try:
         async with session.post(url=api_url, json=payload, headers=headers) as response:
             if response.status == HTTP_OK:
@@ -308,34 +311,29 @@ async def patched_async_request_openai_chat_completions(
                         chunk = message.removeprefix("data: ")
 
                         if chunk != "[DONE]":
-                            timestamp = time.perf_counter()
                             data = json.loads(chunk)
 
                             if choices := data.get("choices"):
                                 delta = choices[0]["delta"]
-                                content = delta.get("content")
-                                reasoning_content = delta.get("reasoning_content")
-                                # First token
-                                if ttft == 0.0:
-                                    ttft = timestamp - st
-                                    output.ttft = ttft
-
-                                # Decoding phase
-                                else:
-                                    output.itl.append(timestamp - most_recent_timestamp)
-
-                                if reasoning_content:
-                                    generated_text += reasoning_content
-                                if content:
-                                    generated_text += content
-                            elif usage := data.get("usage"):
-                                output.output_tokens = usage.get("completion_tokens")
-
-                            most_recent_timestamp = timestamp
+                                text = text_from_message(delta)
+                                if text:
+                                    timestamp = time.perf_counter()
+                                    if last_text_timestamp is None:
+                                        output.ttft = timestamp - st
+                                    else:
+                                        output.itl.append(timestamp - last_text_timestamp)
+                                    last_text_timestamp = timestamp
+                                    generated_text += text
+                            if usage := data.get("usage"):
+                                output.output_tokens = usage.get(
+                                    "completion_tokens", output.output_tokens
+                                )
+                                output.prompt_len = usage.get("prompt_tokens", output.prompt_len)
 
                 output.generated_text = generated_text
-                output.success = True
-                output.latency = most_recent_timestamp - st
+                output.success = last_text_timestamp is not None
+                if not output.success:
+                    output.error = "response contains no text output"
             else:
                 output.error = response.reason or ""
                 output.success = False
@@ -344,6 +342,7 @@ async def patched_async_request_openai_chat_completions(
         exc_info = sys.exc_info()
         output.error = "".join(traceback.format_exception(*exc_info))
 
+    output.latency = time.perf_counter() - st
     if pbar:
         pbar.update(1)
     return output
@@ -444,6 +443,9 @@ def patched_get_samples(args, tokenizer):
             # OneRec intentionally disables oversample: duplicated requests
             # would inflate throughput via spurious KV-cache hits.
             no_oversample=True,
+            chat_template_kwargs=(getattr(args, "extra_body", None) or {}).get(
+                "chat_template_kwargs"
+            ),
         )
 
     return original_get_samples(args, tokenizer)

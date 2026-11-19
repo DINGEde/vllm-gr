@@ -4,14 +4,15 @@
 import argparse
 import json
 import logging
+import math
 import os
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
+from pathlib import Path
 from typing import Any
 
-import regex as re
 import requests
 
 try:
@@ -25,6 +26,8 @@ except ImportError:
 # Import patch to register onerec dataset and GR beam-search backends.
 # Must be imported before any vllm.benchmarks module usage.
 import benchmarks.open_one_rec.one_rec_patch  # noqa: F401
+from benchmarks.open_one_rec.base_evaluator import EvaluationError
+from benchmarks.open_one_rec.chat import messages_for_prompt, text_from_message
 from benchmarks.open_one_rec.open_one_rec_loader import TASK_REGISTRY, DataLoaderWrapper
 
 try:
@@ -95,12 +98,19 @@ class MockRequestOutput:
 
 
 def run_offline_v1_inference(
-    llm: Any, prompts: list[str], params: Any, batch_size: int
+    llm: Any,
+    prompts: list[str],
+    params: Any,
+    batch_size: int,
+    *,
+    sample_ids: list[str] | None = None,
 ) -> list[MockRequestOutput]:
     """Preserve sample order and decode only the generated SID token suffix."""
     if batch_size not in (1, 2, 4):
         raise ValueError("V1 batch_size must be 1, 2 or 4")
     outputs = []
+    if sample_ids is None:
+        sample_ids = [str(index) for index in range(len(prompts))]
     tokenizer = llm.get_tokenizer()
     offset = 0
     while offset < len(prompts):
@@ -110,11 +120,17 @@ def run_offline_v1_inference(
         raw_outputs = llm.beam_search_v1(
             [{"prompt": prompt} for prompt in batch], params, output_mode="compact"
         )
+        batch_ids = sample_ids[offset : offset + size]
         if len(raw_outputs) != size:
-            raise RuntimeError("V1 returned an unexpected number of items")
-        for prompt, output in zip(batch, raw_outputs, strict=True):
+            reason = f"V1 returned an unexpected number of items: {len(raw_outputs)} of {size}"
+            raise InferenceError(dict.fromkeys(batch_ids, reason))
+        for sample_id, prompt, output in zip(batch_ids, batch, raw_outputs, strict=True):
             if len(output.sequences) != params.beam_width:
-                raise RuntimeError("V1 returned an unexpected number of beams")
+                reason = (
+                    f"V1 returned an unexpected number of beams: "
+                    f"{len(output.sequences)} of {params.beam_width}"
+                )
+                raise InferenceError({sample_id: reason})
             # Compact output excludes the original prompt. Keep the public SID
             # budget and decode each short candidate once, without materializing
             # full prompt-plus-tail tokens or normalizing the input text.
@@ -132,28 +148,11 @@ def run_offline_v1_inference(
     return outputs
 
 
-# OneRec dataset prompts are stored as fully rendered chat transcripts
-# (Qwen format: "<|im_start|>role\ncontent<|im_end|>" turns). Sending such a
-# transcript as one user message makes the server's chat template wrap the
-# already-rendered turns a second time (a user turn embedding the original
-# system turn), which desynchronizes the online prompt from the offline
-# beam-search input. Parse the transcript back into structured messages so
-# the template is applied exactly once, server-side.
-_CHAT_TURN_RE = re.compile(r"<\|im_start\|>(system|user|assistant)\n(.*?)<\|im_end\|>", re.DOTALL)
-
-
-def _messages_for_prompt(prompt: str) -> list[dict[str, str]]:
-    """Return structured chat messages for a dataset prompt.
-
-    Falls back to a single user turn when the prompt is not a recognizable
-    chat transcript (coverage guard: parsed content must explain most of
-    the original text before structured form is trusted).
-    """
-    turns = _CHAT_TURN_RE.findall(prompt)
-    parsed_chars = sum(len(role) + len(content) for role, content in turns)
-    if turns and parsed_chars >= 0.5 * len(prompt):
-        return [{"role": role, "content": content.strip("\n")} for role, content in turns]
-    return [{"role": "user", "content": prompt}]
+class InferenceError(RuntimeError):
+    def __init__(self, failures: dict[str, str]) -> None:
+        self.failures = failures
+        sample_id, error = next(iter(failures.items()))
+        super().__init__(f"Inference failed for {len(failures)} sample(s); {sample_id}: {error}")
 
 
 def run_api_inference(
@@ -164,6 +163,9 @@ def run_api_inference(
     gen_config: dict[str, Any],
     max_concurrency: int | None = None,
     chat_template_kwargs: dict[str, Any] | None = None,
+    *,
+    samples: list[tuple[str, dict[str, Any]]] | None = None,
+    request_timeout: float = 180.0,
 ) -> list[MockRequestOutput]:
     headers = {
         "Content-Type": "application/json",
@@ -180,53 +182,84 @@ def run_api_inference(
         "n": gen_config.get("num_return_sequences", 1),
         "vllm_xargs": {"begin_token": "<|sid_begin|>", "end_token": "<|sid_end|>"},
     }
-    if chat_template_kwargs is not None:
-        api_params["chat_template_kwargs"] = chat_template_kwargs
+    if not prompts:
+        raise InferenceError({"dataset": "no samples to evaluate"})
 
-    def _send_request(prompt):
-        response = None
-        payload = {"messages": _messages_for_prompt(prompt), **api_params}
+    def send_request(
+        entry: tuple[str, dict[str, Any], str],
+    ) -> MockRequestOutput | str:
+        _, sample, prompt = entry
+        payload = {
+            **api_params,
+            "messages": messages_for_prompt(prompt, sample.get("chat_messages")),
+        }
+        template_options = sample.get("chat_template_kwargs")
+        if template_options is not None or chat_template_kwargs is not None:
+            payload["chat_template_kwargs"] = {
+                **(template_options or {}),
+                **(chat_template_kwargs or {}),
+            }
+
         try:
-            response = requests.post(api_url, headers=headers, json=payload)
+            response = requests.post(
+                api_url, headers=headers, json=payload, timeout=request_timeout
+            )
             response.raise_for_status()
             data = response.json()
+            choices = data.get("choices") if isinstance(data, dict) else None
+            if not isinstance(choices, list) or not choices:
+                return "response contains no choices"
+            if len(choices) != api_params["n"]:
+                return f"expected {api_params['n']} choices, received {len(choices)}"
 
-            # Extract content
-            if data.get("choices"):
-                mock_outputs = []
-                for choice in data["choices"]:
-                    message = choice.get("message", {})
-                    content = message.get("content", "")
-                    reasoning = message.get("reasoning_content", "")  # Support for reasoning models
+            outputs = []
+            for choice in choices:
+                message = choice.get("message") if isinstance(choice, dict) else None
+                if not isinstance(message, dict):
+                    return "choice has no text message"
+                parts = [
+                    message.get(field) for field in ("reasoning", "reasoning_content", "content")
+                ]
+                if any(part is not None and not isinstance(part, str) for part in parts):
+                    return "choice contains non-text message content"
+                text = text_from_message(message)
+                if not text.strip():
+                    return "choice has no text message"
+                outputs.append(MockCompletionOutput(text))
+            return MockRequestOutput(prompt, outputs)
+        except (requests.RequestException, ValueError) as exc:
+            return f"{type(exc).__name__}: {exc}"
 
-                    full_text = ""
-                    if reasoning:
-                        full_text += reasoning
-                    if content:
-                        full_text += content
-                    mock_outputs.append(MockCompletionOutput(full_text))
-                return MockRequestOutput(prompt, mock_outputs)
-            return MockRequestOutput(prompt, [MockCompletionOutput("")])
-        except Exception as e:
-            status_code = response.status_code if response is not None else "N/A"
-            response_text = response.text if response is not None else "N/A"
-            logger.error(f"Request failed. Status code: {status_code}")
-            logger.error(f"[DEBUG] Response text: {response_text}")
-            logger.error(f"Request failed for prompt: {prompt[:50]}... Error: {e}")
-            return MockRequestOutput(prompt, [MockCompletionOutput("")])
-
-    # Run in parallel. The BeamAttentionPool is max_batch=1: only one beam
-    # session may be active at a time, so cap workers at max_concurrency
-    # (callers running beam-search accuracy tests pass --max-concurrency 1).
     worker_limit = max_concurrency if max_concurrency is not None else 16
-    logger.info(f"Sending {len(prompts)} requests to {api_url}...")
-    with ThreadPoolExecutor(max_workers=min(len(prompts), worker_limit)) as executor:
-        results = list(executor.map(_send_request, prompts))
+    if samples is None:
+        samples = [(str(index), {}) for index in range(len(prompts))]
+    entries = [
+        (key, sample, prompt) for (key, sample), prompt in zip(samples, prompts, strict=True)
+    ]
+    logger.info("Sending %s requests to %s", len(entries), api_url)
+    with ThreadPoolExecutor(max_workers=min(len(entries), worker_limit)) as executor:
+        results = list(executor.map(send_request, entries))
+    failures = {
+        sample_id: result
+        for (sample_id, _, _), result in zip(entries, results, strict=True)
+        if isinstance(result, str)
+    }
+    if failures:
+        raise InferenceError(failures)
+    return [result for result in results if isinstance(result, MockRequestOutput)]
 
-    return results
+
+def _report_failure(args: argparse.Namespace, reason: str, **diagnostics: Any) -> int:
+    report = {"status": "failed", "task": args.task_type, "reason": reason, **diagnostics}
+    print(json.dumps(report, indent=2, ensure_ascii=True))
+    if args.result_dir is not None:
+        path = Path(args.result_dir) / f"{args.task_type}-failed.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
+    return 1
 
 
-def main():
+def main() -> int:
     parser = argparse.ArgumentParser(description="Run OpenOneRec Benchmark")
     parser.add_argument(
         "--model", type=str, default="OpenOneRec/OneRec-1.7B", help="Path to model or HF hub name"
@@ -311,7 +344,19 @@ def main():
         default=None,
         help="Online request concurrency; offline V1 uses --batch-size",
     )
+    parser.add_argument(
+        "--request-timeout",
+        type=float,
+        default=180.0,
+        help="Online HTTP connect/read timeout in seconds",
+    )
     args = parser.parse_args()
+    if not math.isfinite(args.request_timeout) or args.request_timeout <= 0:
+        parser.error("--request-timeout must be positive and finite")
+    if args.n is not None and args.n <= 0:
+        parser.error("--n must be positive")
+    if args.max_concurrency is not None and args.max_concurrency <= 0:
+        parser.error("--max-concurrency must be positive")
     if args.enforce_eager and args.endpoint:
         parser.error("Online Eager mode requires --enforce-eager on the server")
     if args.chat_template_kwargs is not None:
@@ -331,7 +376,17 @@ def main():
 
     task_reg = TASK_REGISTRY[args.task_type]
     task_config = task_reg.config
-    gen_config = task_config.get("generation_config", {})
+    gen_config = task_config.get("generation_config", {}).copy()
+    if task_config.get("task_type") == "logprobs_classification":
+        return _report_failure(
+            args,
+            "This accuracy entry point does not provide label token logprobs",
+            auc=None,
+            auc_unavailable_reason="classification_logprobs_unavailable",
+            total_samples=0,
+            valid_samples=0,
+            invalid_samples=0,
+        )
 
     logger.info(f"Loaded configuration for task: {task_config['name']}")
     logger.info(f"Description: {task_config.get('description')}")
@@ -421,6 +476,9 @@ def main():
         references[sample_id] = item["ground_truth"]
         sample_ids.append(sample_id)
 
+    if not prompts:
+        return _report_failure(args, "no samples to evaluate")
+
     # 4. Run Inference
     logger.info("\nStarting Inference...")
     gen_start = 0.0
@@ -428,15 +486,20 @@ def main():
     if args.endpoint:
         gen_start = time.perf_counter()
         api_url = f"http://{args.host}:{args.port}{args.endpoint}"
-        outputs = run_api_inference(
-            prompts,
-            args.model,
-            api_url,
-            args.api_key,
-            gen_config,
-            max_concurrency=args.max_concurrency,
-            chat_template_kwargs=args.chat_template_kwargs,
-        )
+        try:
+            outputs = run_api_inference(
+                prompts,
+                args.model,
+                api_url,
+                args.api_key,
+                gen_config,
+                max_concurrency=args.max_concurrency,
+                chat_template_kwargs=args.chat_template_kwargs,
+                samples=list(dataset.items()),
+                request_timeout=args.request_timeout,
+            )
+        except InferenceError as exc:
+            return _report_failure(args, str(exc), sample_errors=exc.failures)
         gen_end = time.perf_counter()
     else:
         params = BeamSearchParams(
@@ -448,10 +511,15 @@ def main():
             end_token="<|sid_end|>",
             include_stop_str_in_output=True,
         )
-        with GRLLM(**engine_kwargs) as llm:
-            gen_start = time.perf_counter()
-            outputs = run_offline_v1_inference(llm, prompts, params, args.batch_size)
-            gen_end = time.perf_counter()
+        try:
+            with GRLLM(**engine_kwargs) as llm:
+                gen_start = time.perf_counter()
+                outputs = run_offline_v1_inference(
+                    llm, prompts, params, args.batch_size, sample_ids=sample_ids
+                )
+                gen_end = time.perf_counter()
+        except InferenceError as exc:
+            return _report_failure(args, str(exc), sample_errors=exc.failures)
 
     # Print a sample output
     if outputs:
@@ -501,7 +569,12 @@ def main():
         predictions_dir=args.result_dir,
         debug=args.debug,
     )
-    metrics, per_sample_metrics = evaluator.evaluate()
+    try:
+        metrics, per_sample_metrics = evaluator.evaluate()
+    except EvaluationError as exc:
+        return _report_failure(args, str(exc))
+    if "auc" in metrics and metrics["auc"] is None:
+        return _report_failure(args, "AUC is undefined", **metrics)
     metrics["elapsed_time"] = gen_end - gen_start
 
     print(f"\n--- Evaluation Results for {args.task_type} on model {args.model} ---")
@@ -523,7 +596,8 @@ def main():
         with open(output_path, "w") as f:
             json.dump(metrics, f, indent=2)
         logger.info(f"Saved metrics to {output_path}")
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

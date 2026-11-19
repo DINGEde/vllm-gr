@@ -23,6 +23,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+# Direct script invocation also needs the source checkout's shared statistics.
+if __package__ in (None, ""):
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+
+from benchmarks.metrics import linear_percentile_sorted
+
 MAX_BEAM_STEPS = 3
 
 
@@ -87,8 +93,7 @@ def _percentile(values: list[float], quantile: float) -> float | None:
     if not values:
         return None
     ordered = sorted(float(value) for value in values)
-    index = min(len(ordered) - 1, int(quantile * (len(ordered) - 1)))
-    return ordered[index]
+    return linear_percentile_sorted(ordered, quantile)
 
 
 def _metric_summaries(runs: list[dict[str, Any]]) -> dict[str, Any]:
@@ -565,7 +570,8 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
         ignore_eos=args.ignore_eos,
         length_penalty=args.length_penalty,
     )
-    max_prompt_len = max(len(row["input_ids"]) for row in workload)
+    input_token_lengths = [len(row["input_ids"]) for row in workload]
+    max_prompt_len = max(input_token_lengths)
     max_model_len = args.max_model_len or max_prompt_len + args.beam_steps
     max_num_batched_tokens = args.max_num_batched_tokens or max(
         max_prompt_len, args.beam_width, max_model_len
@@ -651,7 +657,9 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
         "synthetic_token_layout": (
             args.synthetic_token_layout if args.generate_constraint_triples else None
         ),
-        "context_len": args.context_len,
+        "context_len": max_prompt_len if min(input_token_lengths) == max_prompt_len else None,
+        "declared_context_len": args.context_len,
+        "input_token_lengths": input_token_lengths,
         "token_id_start": args.token_id_start,
         "token_id_end_exclusive": args.token_id_end,
         "beam_steps": args.beam_steps,

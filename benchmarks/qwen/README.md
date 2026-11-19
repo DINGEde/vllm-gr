@@ -139,3 +139,14 @@ Constraint triples and the canonical artifact default beside the result JSON.
 
 Run the shell entry point with `--help`, or the Python entry point with
 `--help`, for all supported settings.
+
+## Reading the result JSON
+
+`input_token_lengths` lists the lengths of the token ID arrays actually sent,
+in request order. `context_len` reports their common length, or `null` for
+mixed lengths. `declared_context_len` records the CLI setting.
+
+Each measured round records the original request latencies and interpolates
+p50 and p95 linearly across its sorted samples. The top-level percentile
+medians are medians across measured rounds. Warmup and profiler runs are
+excluded.

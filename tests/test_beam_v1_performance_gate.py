@@ -186,6 +186,13 @@ def test_shared_driver_imports_each_selected_runtime(
     repo_env = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
     roots = [tmp_path / "base", tmp_path / "candidate"]
     for root in roots:
+        benchmark_dir = root / "benchmarks/beam_search"
+        benchmark_dir.mkdir(parents=True)
+        # The old base has a regular package, which prevents Python from
+        # discovering candidate-only helpers through namespace-package merging.
+        (root / "benchmarks/__init__.py").write_text("", encoding="utf-8")
+        validator = Path(gate.__file__).with_name("v1_sid_validation.py")
+        (benchmark_dir / validator.name).write_bytes(validator.read_bytes())
         (root / "vllm_gr").mkdir(parents=True)
         (root / "vllm_gr/__init__.py").write_text(f"SOURCE = {root.name!r}\n", encoding="utf-8")
         subprocess.run(["git", "init", "-q", str(root)], env=repo_env, check=True)
@@ -208,16 +215,27 @@ def test_shared_driver_imports_each_selected_runtime(
             env=repo_env,
             check=True,
         )
-    driver = roots[1] / "benchmarks/beam_search/driver.py"
-    driver.parent.mkdir(parents=True)
+    candidate_metrics = roots[1] / "benchmarks/metrics.py"
+    candidate_metrics.write_bytes(
+        Path(gate.__file__).parents[1].joinpath("metrics.py").read_bytes()
+    )
+    candidate_driver = roots[1] / "benchmarks/beam_search/v1_performance_gate.py"
+    candidate_driver.write_bytes(Path(gate.__file__).read_bytes())
+    assert not (roots[0] / "benchmarks/metrics.py").exists()
+    driver = candidate_driver.with_name("driver.py")
     driver.write_text(
-        "import hashlib, json, sys\n"
+        "import hashlib, json, runpy, sys\n"
         "from pathlib import Path\n"
         "import vllm_gr\n"
+        "driver = Path(__file__).with_name('v1_performance_gate.py')\n"
+        "functions = runpy.run_path(str(driver))\n"
+        "percentile = functions['linear_percentile_sorted']\n"
         "output = Path(sys.argv[sys.argv.index('--output-dir') + 1])\n"
         "name = 'setup' if sys.argv[1] == 'prepare' else 'offline'\n"
-        "data = {'source': vllm_gr.SOURCE, 'driver': "
-        "hashlib.sha256(Path(__file__).read_bytes()).hexdigest()}\n"
+        "data = {'source': vllm_gr.SOURCE, "
+        "'metrics': str(Path(percentile.__code__.co_filename).resolve()), "
+        "'p95': functions['distribution']([10.0, 100.0])['p95_ms'], "
+        "'driver': hashlib.sha256(driver.read_bytes()).hexdigest()}\n"
         "(output / (name + '.json')).write_text(json.dumps(data))\n",
         encoding="utf-8",
     )
@@ -245,6 +263,8 @@ def test_shared_driver_imports_each_selected_runtime(
         for name in ("setup", "offline"):
             data = json.loads((output / f"{name}.json").read_text())
             assert data["source"] == root.name
+            assert Path(data["metrics"]) == candidate_metrics.resolve()
+            assert data["p95"] == 95.5
             driver_digests.add(data["driver"])
     assert len(driver_digests) == 1
 

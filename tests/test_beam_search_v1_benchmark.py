@@ -5,6 +5,9 @@ from __future__ import annotations
 
 import gzip
 import json
+import os
+import subprocess
+import sys
 from argparse import Namespace
 from pathlib import Path
 from types import SimpleNamespace
@@ -12,6 +15,8 @@ from typing import Any, overload
 
 import pytest
 
+from benchmarks.beam_search.v1_performance_gate import distribution
+from benchmarks.metrics import linear_percentile_sorted
 from benchmarks.qwen import benchmark_v1 as benchmark
 from benchmarks.qwen import make_workload as workload
 
@@ -365,3 +370,108 @@ def test_reused_workload_must_match_shared_interval(tmp_path: Path) -> None:
 
 
 pytestmark = pytest.mark.cpu_test
+
+
+@pytest.mark.l1  # type: ignore[misc]
+def test_latency_percentiles_match_beam_gate() -> None:
+    samples = [10.0, 100.0]
+    assert benchmark._percentile(samples, 0.50) == distribution(samples)["p50_ms"] == 55.0
+    assert benchmark._percentile(samples, 0.95) == distribution(samples)["p95_ms"] == 95.5
+    assert linear_percentile_sorted(samples, 0.95) == 95.5
+    assert linear_percentile_sorted([10.0], 0.95) == benchmark._percentile([10.0], 0.95) == 10.0
+    assert distribution([10.0])["p95_ms"] == 10.0
+    assert benchmark._percentile([], 0.95) is None
+    for invalid in ([], [0.0], [-1.0], [float("nan")], [float("inf")]):
+        with pytest.raises(ValueError, match="positive finite values"):
+            distribution(invalid)
+
+
+@pytest.mark.l1  # type: ignore[misc]
+@pytest.mark.parametrize("second_length,common_length", [(128, 128), (256, None)])  # type: ignore[misc]
+def test_report_input_lengths_come_from_consumed_jsonl_rows(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, second_length: int, common_length: int | None
+) -> None:
+    input_path = tmp_path / "workload.jsonl"
+    with input_path.open("w") as stream:
+        for length in (128, second_length, 999):
+            print(json.dumps({"input_ids": [100] * length, "context_len": 5000}), file=stream)
+    args = benchmark.build_parser().parse_args(
+        [
+            "--model",
+            "model",
+            "--output-json",
+            str(tmp_path / "report.json"),
+            "--workload-jsonl",
+            str(input_path),
+            "--requests",
+            "2",
+            "--token-id-start",
+            "100",
+            "--token-id-end",
+            "200",
+            "--warmup-runs",
+            "0",
+            "--repeat",
+            "1",
+            "--beam-width",
+            "1",
+        ]
+    )
+    benchmark.finalize_args(args)
+    inputs: list[int] = []
+
+    class Engine:
+        def __enter__(self) -> Any:
+            return self
+
+        def __exit__(self, *exc: object) -> None:
+            pass
+
+        def beam_search_v1(
+            self, prompts: list[dict[str, list[int]]], *_: Any, **kw: Any
+        ) -> list[Any]:
+            ids = prompts[0]["prompt_token_ids"]
+            inputs.append(len(ids))
+            beam = SimpleNamespace(tokens=[*ids, 101, 102, 103], cum_logprob=-1.0)
+            return [SimpleNamespace(sequences=[beam])]
+
+    monkeypatch.setitem(sys.modules, "torch", SimpleNamespace())
+    monkeypatch.setitem(
+        sys.modules, "vllm_gr.entrypoints.gr", SimpleNamespace(GRLLM=lambda **kw: Engine())
+    )
+    monkeypatch.setitem(
+        sys.modules, "vllm_gr.sampling_params", SimpleNamespace(BeamSearchParams=lambda **kw: kw)
+    )
+    monkeypatch.setattr(benchmark, "_load_model_assets", lambda _: (object(), 1000))
+    monkeypatch.setattr(
+        benchmark, "ensure_constraint_document", lambda *a, **kw: tmp_path / "triples.json"
+    )
+    monkeypatch.setattr(
+        benchmark,
+        "build_constraint_artifact",
+        lambda *a, **kw: benchmark.ConstraintArtifact(
+            tmp_path / "constraint.safetensors", "a", "b", 1000
+        ),
+    )
+    monkeypatch.setattr(benchmark, "canonical_gr_config", lambda *a: {})
+    monkeypatch.setattr(benchmark, "_environment", lambda _: {})
+
+    report = benchmark.run_benchmark(args)
+    assert report["context_len"] == common_length
+    assert report["declared_context_len"] == 5000
+    assert report["input_token_lengths"] == inputs == [128, second_length]
+    assert len(report["runs"][0]["request_latencies_ms"]) == len(inputs)
+
+
+@pytest.mark.l1  # type: ignore[misc]
+def test_direct_benchmark_help_imports_shared_metrics(tmp_path: Path) -> None:
+    env = {key: value for key, value in os.environ.items() if key != "PYTHONPATH"}
+    completed = subprocess.run(
+        [sys.executable, str(Path(benchmark.__file__).resolve()), "--help"],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert "--workload-jsonl" in completed.stdout

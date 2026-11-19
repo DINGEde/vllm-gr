@@ -38,6 +38,15 @@ python -m benchmarks.open_one_rec.one_rec_main bench throughput \
 
 Start the server using the [online V1 guide](../../examples/online_serving/beam_search/README.md#start-the-server).
 The client uses a local tokenizer from the same model snapshot as the server.
+Pass `--chat-template benchmarks/open_one_rec/qwen3_soft_switch.jinja2` to
+the server to match the offline renderer. The client sends the original
+chat turns and the task's thinking setting. A per-run setting in
+`--extra-body` takes precedence over the task default.
+
+Streaming TTFT starts at the first non-empty reasoning or answer fragment.
+ITL measures the intervals between successive text fragments, including
+whitespace fragments. Request latency runs through the end of the response
+stream. A stream with no text output fails the request.
 
 #### Terminal 2 — Run the throughput benchmark against the server
 
@@ -80,7 +89,10 @@ python -m benchmarks.open_one_rec.one_rec_main bench serve \
 ### OpenOneRec Length Caveats
 
 - For OpenOneRec, effective prompt length comes from each task input after task formatting, not from a strict benchmark-spec template length.
-- `--custom-input-len` normalizes length by trimming or repeating prompt tokens per sample.
+- `--custom-input-len` trims or repeats the locally rendered prompt per sample.
+  The online chat workload sends that adjusted text as user content. Chat
+  framing adds tokens, so the server's prompt length can differ from the local
+  target. Online totals use the server's `usage.prompt_tokens` when available.
 - This can distort semantic content; therefore user-defined prefix length is intended for throughput/latency experiments and is not recommended for accuracy measurement.
 
 #### Beam Search Parameters (Optional)

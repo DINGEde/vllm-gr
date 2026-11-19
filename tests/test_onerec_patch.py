@@ -26,6 +26,8 @@ installing stub ``vllm.benchmarks.*`` modules.
 # mypy: disable-error-code="attr-defined,no-untyped-def,no-any-return,misc,arg-type,var-annotated,union-attr,return-value,func-returns-value,no-untyped-call,operator,index,valid-type,no-redef,has-type,type-arg"
 from __future__ import annotations
 
+import asyncio
+import json
 import subprocess
 import sys
 import types
@@ -214,6 +216,8 @@ def _install_stub_vllm_benchmarks() -> dict[str, types.ModuleType]:
         multi_modal_data: Any = None
         lora_request: Any = None
         request_id: str | None = None
+        chat_messages: list[dict[str, Any]] | None = None
+        request_overrides: dict[str, Any] | None = None
 
     datasets.SampleRequest = _StubSampleRequest  # type: ignore[attr-defined]
 
@@ -651,6 +655,120 @@ class TestPatchTriggerContractWithStubVllm(unittest.TestCase):
             )
             run_v1.assert_called_once_with(args, tokenizer, [request])
 
+    def _stream_result(self, timed_deltas, completion_tokens):
+        import benchmarks.open_one_rec.one_rec_patch as patch_mod
+
+        current_time = 0.0
+        messages = [
+            (timestamp, "data: " + json.dumps({"choices": [{"delta": delta}]}))
+            for timestamp, delta in timed_deltas
+        ]
+        end_time = timed_deltas[-1][0]
+        messages.extend(
+            [
+                (
+                    end_time + 0.01,
+                    "data: "
+                    + json.dumps(
+                        {"usage": {"prompt_tokens": 3, "completion_tokens": completion_tokens}}
+                    ),
+                ),
+                (end_time + 0.02, "data: [DONE]"),
+            ]
+        )
+
+        class Stream:
+            async def iter_any(inner_self):
+                nonlocal current_time
+                for timestamp, message in messages:
+                    current_time = timestamp
+                    yield message.encode()
+
+        response = types.SimpleNamespace(status=200, content=Stream())
+        session = mock.MagicMock()
+        session.post.return_value.__aenter__ = mock.AsyncMock(return_value=response)
+        request = types.SimpleNamespace(
+            api_url="http://localhost/v1/chat/completions",
+            chat_messages=[{"role": "user", "content": "question"}],
+            model_name=None,
+            model="model",
+            use_beam_search=False,
+            n=1,
+            output_len=5,
+            extra_body=None,
+            prompt_len=3,
+        )
+        handler = mock.MagicMock()
+        handler.add_chunk.side_effect = lambda chunk: [chunk.decode()]
+        output = types.SimpleNamespace(itl=[], output_tokens=0, ttft=0.0)
+        with (
+            mock.patch.object(patch_mod, "_validate_api_url"),
+            mock.patch.object(patch_mod, "_update_payload_common"),
+            mock.patch.object(patch_mod, "_update_headers_common"),
+            mock.patch.object(patch_mod, "StreamedResponseHandler", return_value=handler),
+            mock.patch.object(patch_mod, "RequestFuncOutput", return_value=output),
+            mock.patch.object(patch_mod.time, "perf_counter", side_effect=lambda: current_time),
+        ):
+            return asyncio.run(
+                patch_mod.patched_async_request_openai_chat_completions(request, session)
+            )
+
+    @pytest.mark.l1
+    def test_streaming_reads_new_and_legacy_reasoning_fields_once(self) -> None:
+        actual = self._stream_result(
+            [
+                (0.01, {"role": "assistant"}),
+                (0.10, {"reasoning": "hello"}),
+                (0.15, {"reasoning": " world", "reasoning_content": " world"}),
+                (0.20, {"reasoning": "", "reasoning_content": "!"}),
+                (0.25, {"content": " answer"}),
+                (0.26, {"content": " "}),
+            ],
+            completion_tokens=5,
+        )
+        self.assertTrue(actual.success, getattr(actual, "error", ""))
+        self.assertEqual(actual.generated_text, "hello world! answer ")
+        self.assertEqual(actual.prompt_len, 3)
+        self.assertEqual(actual.output_tokens, 5)
+        self.assertAlmostEqual(actual.ttft, 0.10)
+        self.assertEqual(len(actual.itl), 4)
+        for actual_itl, expected in zip(actual.itl, (0.05, 0.05, 0.05, 0.01), strict=True):
+            self.assertAlmostEqual(actual_itl, expected)
+        self.assertAlmostEqual(actual.latency, 0.28)
+
+    @pytest.mark.l1
+    def test_streaming_counts_only_text_chunks_in_token_latencies(self) -> None:
+        actual = self._stream_result(
+            [
+                (0.01, {"role": "assistant"}),
+                (0.10, {"content": "hello"}),
+                (0.11, {}),
+            ],
+            completion_tokens=1,
+        )
+        self.assertTrue(actual.success, getattr(actual, "error", ""))
+        self.assertEqual(actual.generated_text, "hello")
+        self.assertAlmostEqual(actual.ttft, 0.10)
+        self.assertEqual(actual.itl, [])
+        self.assertAlmostEqual(actual.latency, 0.13)
+
+    @pytest.mark.l1
+    def test_streaming_rejects_a_stream_without_text_output(self) -> None:
+        actual = self._stream_result(
+            [
+                (0.01, {"role": "assistant"}),
+                (0.11, {}),
+            ],
+            completion_tokens=0,
+        )
+        self.assertFalse(actual.success)
+        self.assertIn("no text", actual.error)
+        self.assertEqual(actual.generated_text, "")
+        self.assertEqual(actual.output_tokens, 0)
+        self.assertEqual(actual.ttft, 0.0)
+        self.assertEqual(actual.itl, [])
+        self.assertAlmostEqual(actual.latency, 0.13)
+
     def test_idempotent_reimport_keeps_patches(self) -> None:
         """Re-importing the patch module (sys.modules cache hit) MUST NOT undo patches."""
         # isort: off
@@ -885,6 +1003,24 @@ class TestOneRecDatasetSampleContract(unittest.TestCase):
         }
         defaults.update(overrides)
         return self._ds_mod.OneRecDataset(**defaults)
+
+    @pytest.mark.l1
+    def test_sample_preserves_original_chat_only_for_unmodified_prompts(self) -> None:
+        ds = self._make_dataset(disable_shuffle=True)
+        turns = [{"role": "system", "content": "s"}, {"role": "user", "content": "u"}]
+        ds.data[0]["chat_messages"] = turns
+        ds.data[0]["chat_template_kwargs"] = {"enable_thinking": False}
+        standard, adjusted = ds.sample(
+            tokenizer=_FakeTokenizer(),
+            num_requests=2,
+            chat_template_kwargs={"enable_thinking": True},
+        )
+        self.assertEqual(standard.chat_messages, turns)
+        self.assertEqual(
+            standard.request_overrides, {"chat_template_kwargs": {"enable_thinking": True}}
+        )
+        self.assertIsNone(adjusted.chat_messages)
+        self.assertIsNone(adjusted.request_overrides)
 
     # -- 5.3: request_id_prefix is honored ----------------------------------
 

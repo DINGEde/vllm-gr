@@ -106,6 +106,8 @@ class OneRecDataset(BenchmarkDataset):
                 self.data.append(
                     {
                         "prompt": data["prompt"],
+                        "chat_messages": data.get("chat_messages"),
+                        "chat_template_kwargs": data.get("chat_template_kwargs"),
                         "expected_output_len": expected_output_len,
                         "ground_truth": data["ground_truth"],
                         "task_type": task_type,
@@ -139,12 +141,24 @@ class OneRecDataset(BenchmarkDataset):
             prompt = item["prompt"]
             prompt_len = len(tokenizer(prompt).input_ids)
             expected_output_len = item["expected_output_len"]
+            chat_fields = {}
+            if item.get("chat_messages") is not None:
+                chat_fields = {
+                    "chat_messages": item["chat_messages"],
+                    "request_overrides": {
+                        "chat_template_kwargs": {
+                            **item["chat_template_kwargs"],
+                            **(kwargs.get("chat_template_kwargs") or {}),
+                        }
+                    },
+                }
             sampled_requests.append(
                 SampleRequest(
                     prompt=prompt,
                     prompt_len=prompt_len,
                     expected_output_len=expected_output_len,
                     request_id=f"{request_id_prefix}{item['task_type']}_{item['id']}",
+                    **chat_fields,
                 )
             )
 

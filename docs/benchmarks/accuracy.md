@@ -43,7 +43,10 @@ python -m benchmarks.open_one_rec.one_rec_acc_test \
 Start the server with the [canonical online Beam configuration](../../examples/online_serving/beam_search/README.md#start-the-server).
 The accuracy client uses `--model` both as the API model name and to load the tokenizer,
 so use the same accessible model ID or snapshot path on both sides. For this
-example, pass `--served-model-name "$ONEREC_MODEL"` to the server.
+example, pass `--served-model-name "$ONEREC_MODEL"` and
+`--chat-template benchmarks/open_one_rec/qwen3_soft_switch.jinja2` to the
+server. The client sends the source chat turns and the task's thinking
+setting. `--chat-template-kwargs` can override that setting for an online run.
 
 #### Terminal 2 — Run the accuracy benchmark against the server
 
@@ -61,6 +64,28 @@ python -m benchmarks.open_one_rec.one_rec_acc_test \
 ```
 
 For an authenticated deployment, pass the configured key with `--api-key`.
+Use `--request-timeout` to override the default 180-second HTTP connect and
+read timeout. HTTP failures, malformed responses and unexpected choice counts
+fail the run. Each choice needs non-blank answer or reasoning text. The client
+prefers `reasoning` and falls back to `reasoning_content` for older servers. With
+`--result-dir`, the client saves affected sample IDs and errors to
+`<task>-failed.json`.
+
+The `label_pred` task requires label-token probabilities. This entry point
+currently exits before inference for that task. The evaluator reports an
+undefined AUC as `null` with valid and invalid sample counts and a reason
+when zero or one class has usable probabilities. Judge-enabled tasks also
+fail when the Judge is unavailable or cannot produce valid scores. The
+recommendation-reason Judge requires a score for every selected sample and
+fails on empty predictions. WIP matching must account for every occurrence
+of each reference and model point. Saved Judge results are for diagnostics
+and are evaluated afresh on subsequent runs.
+
+For `rec_reason`, set `llm_judge_model` in the task's `evaluation_config` to
+the model name exposed by the Judge service. `vllm_endpoint` and `vllm_api_key`
+configure its OpenAI-compatible API. `vllm_async=True` uses the asynchronous
+SDK inside scoring workers. Each sample score must be an integer from 1 to 5;
+the reported mean can be fractional.
 
 ## Usage
 
@@ -79,7 +104,7 @@ For an authenticated deployment, pass the configured key with `--api-key`.
 | `--dataset-name`   | str   | onerec           | Must be `onerec` for OneRec benchmark                                     |
 | `--dataset-path`   | str   | ./data           | Path to benchmark data directory                                          |
 | `--num-prompts`    | int   | all              | Number of prompts to sample                                               |
-| `--task-type`      | str   | -                | Task to run (ad, product, label_cond, video, interactive, label_pred)     |
+| `--task-type`      | str   | -                | Task to run (ad, product, label_cond, video, interactive)                 |
 | `--result-dir`     | str   | -                | Directory to save debug evaluation files                                  |
 | `--debug`          | -     | -                | Enable debug mode for evaluators                                          |
 | `--vllm-gr-config` | path  | -                | Required offline. Path to the canonical V1 config                         |

@@ -12,6 +12,7 @@ import math
 import os
 import statistics
 import time
+from importlib.util import module_from_spec, spec_from_file_location
 from pathlib import Path
 from typing import Any
 
@@ -20,25 +21,30 @@ from benchmarks.beam_search.v1_sid_validation import (
     validate_sid_tokens,
 )
 
+# A/B executes this candidate driver against both runtimes. Resolve the
+# shared statistics beside the driver because an older base can have its own
+# benchmarks package without metrics.py. Runtime imports still use PYTHONPATH.
+_metrics_path = Path(__file__).resolve().parents[1] / "metrics.py"
+_metrics_spec = spec_from_file_location("_gr_benchmark_metrics", _metrics_path)
+if _metrics_spec is None or _metrics_spec.loader is None:
+    raise ImportError(f"Cannot load benchmark statistics from {_metrics_path}")
+_metrics = module_from_spec(_metrics_spec)
+_metrics_spec.loader.exec_module(_metrics)
+linear_percentile_sorted = _metrics.linear_percentile_sorted
+
 
 def distribution(values: list[float]) -> dict[str, float]:
     if not values or any(not math.isfinite(value) or value <= 0 for value in values):
         raise ValueError("latency samples must be positive finite values")
     ordered = sorted(values)
 
-    def percentile(fraction: float) -> float:
-        position = (len(ordered) - 1) * fraction
-        lower = int(position)
-        upper = min(lower + 1, len(ordered) - 1)
-        return ordered[lower] + (ordered[upper] - ordered[lower]) * (position - lower)
-
     return {
         "min_ms": ordered[0],
         "mean_ms": statistics.fmean(ordered),
-        "p50_ms": percentile(0.50),
-        "p90_ms": percentile(0.90),
-        "p95_ms": percentile(0.95),
-        "p99_ms": percentile(0.99),
+        "p50_ms": linear_percentile_sorted(ordered, 0.50),
+        "p90_ms": linear_percentile_sorted(ordered, 0.90),
+        "p95_ms": linear_percentile_sorted(ordered, 0.95),
+        "p99_ms": linear_percentile_sorted(ordered, 0.99),
         "max_ms": ordered[-1],
         "std_ms": statistics.pstdev(ordered),
     }

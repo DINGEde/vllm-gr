@@ -568,6 +568,10 @@ class BaseLoader(ABC):
                 "metadata": self._make_metadata_serializable(idx, metadata_dict),
             }
 
+            if self.custom_input_len is None:
+                result_item["chat_messages"] = messages
+                result_item["chat_template_kwargs"] = {"enable_thinking": enable_thinking}
+
             result[sample_id] = result_item
 
         logger.info(f"Loaded {len(result)} samples for {self.task_name}")

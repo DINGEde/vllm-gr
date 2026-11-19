@@ -90,7 +90,11 @@ def test_accuracy_cli_selects_engine_execution_mode(
     )
     monkeypatch.setattr(transformers.AutoTokenizer, "from_pretrained", lambda *a, **kw: object())
     monkeypatch.setattr(
-        benchmark, "DataLoaderWrapper", lambda **kw: SimpleNamespace(load_data=lambda **kw: {})
+        benchmark,
+        "DataLoaderWrapper",
+        lambda **kw: SimpleNamespace(
+            load_data=lambda **kw: {"0": {"prompt": "test", "ground_truth": "a SID"}}
+        ),
     )
     monkeypatch.setattr(benchmark, "GRLLM", engine)
     monkeypatch.setattr(
