@@ -58,11 +58,11 @@ The context limit is 2,048 tokens. With chunked Prefill disabled, keep
 
 Leave the server running. Model loading, kernel compilation, and graph capture
 can take several minutes. In a second terminal at the repository root, set
-`ONEREC_WORKDIR` to the directory used to prepare the catalog. The readiness
-check returns HTTP 200 with an empty body.
+`ONEREC_WORKDIR` first if you prepared the catalog in a different directory.
+The readiness check returns HTTP 200 with an empty body.
 
 ```bash
-export ONEREC_WORKDIR="$PWD/results/onerec-serving"
+export ONEREC_WORKDIR="${ONEREC_WORKDIR:-$PWD/results/onerec-serving}"
 curl --fail --silent --show-error --output /dev/null http://127.0.0.1:8000/health
 ```
 
@@ -77,7 +77,7 @@ or `VLLM_API_KEY`, set `VLLM_API_KEY` in the client terminal too.
 bash examples/online_serving/beam_search/client.sh \
   > "$ONEREC_WORKDIR/result.json" \
 && python examples/online_serving/catalog/verify_catalog.py \
-  "$ONEREC_WORKDIR/result.json" "$ONEREC_WORKDIR/catalog.json" --expected-count 128
+  "$ONEREC_WORKDIR/result.json" "$ONEREC_WORKDIR/catalog.json"
 ```
 
 The client sends a plain prompt to `/v1/completions`. Use `-p` to pass a
@@ -88,17 +88,14 @@ for two boundary markers and three SID components.
   both terminals. Start the server with that value in `--served-model-name`.
   If you change the server address or port, set `ONEREC_BASE_URL` on the client.
 - To change the width, [update the server YAML and capacity flags](../catalog/README.md#change-the-beam-width),
-  then pass the matching request width with `-b`. Set `--expected-count` only
-  if you know how many SIDs the catalog and prompt should return.
+  then pass the matching request width with `-b`.
 
 Each `choices[].text` contains a complete SID, for example
 `<|sid_begin|><s_a_346><s_b_6566><s_c_5603><|sid_end|>`.
 The model, catalog, and prompt determine the SIDs and their order. The verifier
-prints the following when all 128 results pass.
-
-```text
-SUCCESS: All 128 generated SIDs exist in the catalog.
-```
+reports the actual number of SIDs when all returned choices pass. See
+[saved response verification](../catalog/README.md#verify-a-saved-response)
+to also assert an expected count.
 
 Press Ctrl+C in the server terminal to stop the service.
 

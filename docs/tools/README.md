@@ -285,7 +285,7 @@ python -m pytest --run-slow -q tests/st/test_onerec_v1_scheduler_st.py
 For NPU end-to-end coverage, use
 `tests/st/test_onerec_v1_npu_e2e.py` with `--run-slow`, the Ascend runtime,
 xllm-ops, and `ASCEND_RT_VISIBLE_DEVICES`. Pangu tests use `PANGU1B_MODEL_PATH`
-or `PANGU_MODEL_PATH`; see the [Pangu guide](../../examples/offline_inference/pangu1b/README.md).
+or `PANGU_MODEL_PATH`; see the [Pangu guide](pangu1b.md).
 Missing prerequisites may cause skips or failures depending on the test.
 
 Use the [runner isolation probe](../modelrunner_v2_multibatch.md#reproduce-the-execution-regression)

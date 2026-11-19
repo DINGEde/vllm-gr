@@ -3,40 +3,53 @@
 ## Run OneRec offline
 
 Install the [CUDA runtime](../docs/quickstart.md) or
-[Ascend runtime](../docs/quickstart-ascend.md). Download
-[OneRec-1.7B and its tokenizer](../docs/onerec_v1_async_quickstart.md#1-check-the-environment).
-Run the command for your device from the repository root.
+[Ascend runtime](../docs/quickstart-ascend.md). Run these commands from the
+repository root in Bash. The first run needs only a local OneRec-1.7B model
+snapshot with its tokenizer.
+
+If you already have the snapshot, set `ONEREC_MODEL` to its directory.
+
+```bash
+export ONEREC_MODEL=/absolute/path/to/OneRec-1.7B
+```
+
+To download the snapshot with the Hugging Face CLI, use a directory outside
+the checkout.
+
+```bash
+export ONEREC_MODEL="$HOME/.cache/vllm-gr/models/OneRec-1.7B"
+hf download OpenOneRec/OneRec-1.7B --local-dir "$ONEREC_MODEL"
+```
 
 ### CUDA
 
 ```bash
-python examples/offline_inference/beam_search/quickstart.py \
-  --model /path/to/OneRec-1.7B
+python examples/offline_inference/beam_search/quickstart.py --model "$ONEREC_MODEL"
 ```
 
 ### Ascend
 
 ```bash
 python examples/offline_inference/beam_search/quickstart.py \
-  --model /path/to/OneRec-1.7B --constraint-backend npu --execution eager
+  --model "$ONEREC_MODEL" --constraint-backend npu --execution eager
 ```
 
 ### Expected output
 
-The script prints `request=0 returned_beams=128`, followed by the tokens and
-scores of the first five candidates. It uses `Recommend the next video.` by
-default. Pass `--prompt /path/to/prompt.txt` to use a UTF-8 file at its
-natural token length.
+With the defaults, `request=0 returned_beams=128` means the first request
+returned 128 candidates. The script shows the five highest-ranked candidates
+with their `beam_tokens` and `cumulative_logprob`. It uses
+`Recommend the next video.` by default. Pass `--prompt /path/to/prompt.txt`
+to use a UTF-8 file at its natural token length.
 
-Full-vocabulary search can return invalid SIDs. Use a catalog to restrict the
-output to known items.
+Full-vocabulary search can return candidates outside your catalog.
+[Try a small catalog](offline_inference/beam_search/README.md#run-with-a-constraint-table)
+to restrict the output to known items.
 
-- [Generate SIDs from your catalog](offline_inference/beam_search/README.md#run-with-a-constraint-table)
 - [Serve OneRec over HTTP and verify a response](online_serving/beam_search/README.md)
 - [Serve OneRec over gRPC](online_serving/grpc/README.md)
 - [Measure offline Beam Search latency](offline_inference/beam_search/README.md#measure-latency-without-profiling)
 - [Measure offline or online throughput](../docs/benchmarks/throughput.md)
-- [Run offline Pangu inference](offline_inference/pangu1b/README.md)
 
 ## Run Sidecar hot updates
 

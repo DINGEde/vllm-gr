@@ -14,7 +14,6 @@ Skip when the model path is unavailable (CI without weights).
 
 from __future__ import annotations
 
-import importlib.util
 import json
 import os
 import subprocess
@@ -27,6 +26,7 @@ from unittest import mock
 import pytest
 
 from tests.helpers.paths import REPO_ROOT
+from tests.st import pangu_generate
 from tests.st.pangu1b_st_common import get_model_path, require_pangu_st_runtime
 
 ROOT = REPO_ROOT
@@ -35,7 +35,6 @@ DEFAULT_MIN_ACCURACY = os.environ.get(
     "PANGU1B_OFFLINE_ACCURACY_THRESHOLD",
     os.environ.get("PANGU1B_MIN_ACCURACY", "0.5"),
 )
-PANGU_EXAMPLE = ROOT / "examples" / "offline_inference" / "pangu1b" / "pangu_generate.py"
 
 
 def _parse_cli_summary(stdout: str) -> dict:
@@ -57,7 +56,7 @@ def _parse_cli_summary(stdout: str) -> dict:
 @pytest.mark.npu_test
 @pytest.mark.model_test
 class TestPangu1bAccuracyST(unittest.TestCase):
-    """End-to-end accuracy ST for Pangu via offline inference example."""
+    """End-to-end accuracy ST for the Pangu offline evaluation CLI."""
 
     def setUp(self) -> None:
         require_pangu_st_runtime()
@@ -72,7 +71,7 @@ class TestPangu1bAccuracyST(unittest.TestCase):
 
         cmd = [
             sys.executable,
-            str(PANGU_EXAMPLE),
+            str(Path(__file__).with_name("pangu_generate.py")),
             "--model",
             model_path,
             "--dataset-path",
@@ -105,7 +104,7 @@ class TestPangu1bAccuracyST(unittest.TestCase):
                     summary = _parse_cli_summary(proc.stdout)
                 except json.JSONDecodeError as exc:
                     self.fail(
-                        "Failed to parse example JSON summary\n"
+                        "Failed to parse evaluation JSON summary\n"
                         f"stdout:\n{proc.stdout}\n"
                         f"stderr:\n{proc.stderr}\n"
                         f"parse error: {exc}"
@@ -134,47 +133,25 @@ class TestPangu1bAccuracyUnitHooks(unittest.TestCase):
                     require_pangu_st_runtime()
 
     def test_extract_final_answer(self) -> None:
-        spec = importlib.util.spec_from_file_location(
-            "pangu_generate_test",
-            PANGU_EXAMPLE,
+        self.assertEqual(
+            pangu_generate.extract_final_answer("Step by step ... answer is 42."), "42"
         )
-        assert spec is not None and spec.loader is not None
-        pangu_generate = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(pangu_generate)
-        extract_final_answer = pangu_generate.extract_final_answer
-
-        self.assertEqual(extract_final_answer("Step by step ... answer is 42."), "42")
-        self.assertEqual(extract_final_answer("She ate 3/8 of the pizza."), "3/8")
+        self.assertEqual(pangu_generate.extract_final_answer("She ate 3/8 of the pizza."), "3/8")
 
     def test_npu_defaults_to_compatible_block_size(self) -> None:
-        spec = importlib.util.spec_from_file_location(
-            "pangu_generate_npu_block_size_test",
-            PANGU_EXAMPLE,
-        )
-        assert spec is not None and spec.loader is not None
-        pangu_generate = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(pangu_generate)
-
         with mock.patch.object(pangu_generate, "_is_npu_platform", return_value=True):
             kwargs = pangu_generate._pangu_engine_kwargs()
 
         self.assertEqual(kwargs["block_size"], 128)
 
     def test_explicit_block_size_override_is_preserved(self) -> None:
-        spec = importlib.util.spec_from_file_location(
-            "pangu_generate_block_size_override_test",
-            PANGU_EXAMPLE,
-        )
-        assert spec is not None and spec.loader is not None
-        pangu_generate = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(pangu_generate)
-
         with mock.patch.object(pangu_generate, "_is_npu_platform", return_value=True):
             kwargs = pangu_generate._pangu_engine_kwargs(64)
 
         self.assertEqual(kwargs["block_size"], 64)
 
     def test_default_dataset_exists(self) -> None:
+        self.assertEqual(pangu_generate._DEFAULT_DATASET, DEFAULT_DATASET)
         self.assertTrue(DEFAULT_DATASET.is_file())
         raw = DEFAULT_DATASET.read_text(encoding="utf-8").strip()
         self.assertTrue(raw, f"Dataset is empty: {DEFAULT_DATASET}")

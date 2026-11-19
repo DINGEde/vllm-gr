@@ -183,10 +183,10 @@ of installed package metadata are separate questions.
 
 ## Quick Start
 
-Refer to [quickstart](quickstart.md#quick-start) for deployment.
-
-After installation, use the [online V1 serving example](../examples/online_serving/beam_search/README.md)
-with `constraint_table.backend: npu` and the NPU execution settings below.
+- To [run OneRec offline on Ascend](../examples/README.md#run-onerec-offline),
+  prepare the model first, then run the Ascend command on the examples page.
+- Follow the [online V1 serving example](../examples/online_serving/beam_search/README.md)
+  with `constraint_table.backend: npu` and the NPU execution settings below.
 
 ## NPU decode execution options
 

@@ -14,7 +14,6 @@ Skip when the model path is unavailable (CI without weights).
 
 from __future__ import annotations
 
-import importlib.util
 import json
 import os
 import socket
@@ -32,11 +31,11 @@ import pytest
 import requests
 
 from tests.helpers.paths import REPO_ROOT
+from tests.st import pangu_generate
 from tests.st.pangu1b_st_common import get_model_path, require_pangu_st_runtime
 
 ROOT = REPO_ROOT
 DEFAULT_DATASET = ROOT / "tests" / "resources" / "pangu1b" / "gsm8k_mini.json"
-PANGU_EXAMPLE_DIR = ROOT / "examples" / "offline_inference" / "pangu1b"
 DEFAULT_SERVE_TIMEOUT = int(os.environ.get("PANGU1B_SERVE_TIMEOUT", "600"))
 SERVED_MODEL_NAME = os.environ.get("PANGU1B_SERVED_MODEL_NAME", "pangu1b-st")
 
@@ -271,30 +270,18 @@ class TestPangu1bOnlineServeST(unittest.TestCase):
         self.assertEqual(response.status_code, 404)
 
     def test_gsm8k_mini_online_accuracy(self) -> None:
-        spec = importlib.util.spec_from_file_location(
-            "pangu_generate_online_test",
-            PANGU_EXAMPLE_DIR / "pangu_generate.py",
-        )
-        assert spec is not None and spec.loader is not None
-        pangu_generate = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(pangu_generate)
-        _normalize_numeric = pangu_generate._normalize_numeric
-        build_prompt = pangu_generate.build_prompt
-        extract_final_answer = pangu_generate.extract_final_answer
-        load_dataset = pangu_generate.load_dataset
-
-        records = load_dataset(DEFAULT_DATASET, num_prompts=8)
+        records = pangu_generate.load_dataset(DEFAULT_DATASET, num_prompts=8)
         correct = 0
         for row in records:
             body = _chat_completion(
                 self.base_url,
-                content=build_prompt(str(row["question"])),
+                content=pangu_generate.build_prompt(str(row["question"])),
                 # Allow the model to finish its reasoning and final answer.
                 max_tokens=512,
             )
             generated = body["choices"][0]["message"].get("content") or ""
-            predicted = extract_final_answer(generated)
-            expected = _normalize_numeric(str(row["answer"]))
+            predicted = pangu_generate.extract_final_answer(generated)
+            expected = pangu_generate._normalize_numeric(str(row["answer"]))
             if predicted == expected:
                 correct += 1
 

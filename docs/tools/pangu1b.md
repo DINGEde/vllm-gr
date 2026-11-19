@@ -1,6 +1,8 @@
-# Pangu Embedded 1B Offline Inference
+# Pangu Embedded 1B Evaluation and Serving
 
-Run openPangu-Embedded-1B with `vllm-gr`.
+Evaluate openPangu-Embedded-1B on GSM8K-mini, run it with `vllm-gr` for online
+serving, or prepare public weights for a constrained SID Beam smoke test.
+Run the commands from the repository root in Bash.
 
 ## Download the model
 
@@ -12,23 +14,24 @@ export PANGU1B_MODEL_PATH="$(pwd)/openPangu-Embedded-1B-V1.1"
 
 You can read more about this model on [ModelScope](https://modelscope.cn/models/FreedomIntelligence/openPangu-Embedded-1B-V1.1).
 
-## Run the example
+## Run the offline accuracy evaluation
 
-The next command runs the example with the model you downloaded:
+The runner evaluates the downloaded model on
+[`gsm8k_mini.json`](../../tests/resources/pangu1b/gsm8k_mini.json) by default.
 
 ```bash
-python examples/offline_inference/pangu1b/pangu_generate.py \
+python tests/st/pangu_generate.py \
     --model "$PANGU1B_MODEL_PATH" \
     --num-prompts 8
 ```
 
-On Ascend NPU, the example automatically uses KV cache block size 128, as
-required by the native vLLM-Ascend attention backend. It can be overridden
-when validating another backend:
+On Ascend NPU, the runner automatically uses KV cache block size 128, as
+required by the native vLLM-Ascend attention backend. Set `PANGU1B_BLOCK_SIZE`
+to override it when validating another backend.
 
 ```bash
 PANGU1B_BLOCK_SIZE=128 \
-python examples/offline_inference/pangu1b/pangu_generate.py \
+python tests/st/pangu_generate.py \
     --model "$PANGU1B_MODEL_PATH" \
     --num-prompts 8
 ```
@@ -65,7 +68,7 @@ curl http://127.0.0.1:8000/v1/chat/completions \
 
 The SID-extended Pangu checkpoint used by this project is not publicly
 available. To make SID execution reproducible from public assets,
-[`prepare_pangu_sid.py`](../../../tools/model_conversion/prepare_pangu_sid.py)
+[`prepare_pangu_sid.py`](../../tools/model_conversion/prepare_pangu_sid.py)
 prepares a separate checkpoint from the public openPangu weights. Ordinary
 text inference with public Pangu weights is already supported above; this
 step adds the tokenizer symbols and weight rows needed by the existing
@@ -144,8 +147,8 @@ reports outside version control.
 ### Build a matching catalog and run Beam search
 
 Inference requires a working `vllm-gr` accelerator environment; follow the
-[CUDA quickstart](../../../docs/quickstart.md) or
-[Ascend quickstart](../../../docs/quickstart-ascend.md). Run these commands
+[CUDA quickstart](../quickstart.md) or
+[Ascend quickstart](../quickstart-ascend.md). Run these commands
 from the repository root, using the prepared model path above.
 
 Every catalog token must match an atomic token in the prepared tokenizer.
@@ -197,4 +200,5 @@ The Beam example accepts the generated triples document, whose rows have
 Table automatically. Pass this document to `--catalog`, rather than the
 raw list in `catalog.json`. A successful run prints beams from the legal
 catalog, while scores and ordering reflect the untrained SID rows. See the
-[Beam example reference](../beam_search/README.md) for runtime options.
+[Beam example reference](../../examples/offline_inference/beam_search/README.md)
+for runtime options.

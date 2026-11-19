@@ -2,18 +2,87 @@
 
 Run `quickstart.py` with a local OneRec model. The script calls
 `GRLLM.beam_search_v1` over the full vocabulary by default. Pass `--catalog`
-to compile a temporary Constraint Table. Run
-`python offline_beam_search_v1.py --help` for the available options.
+to compile a temporary Constraint Table that restricts generation to your
+catalog. The commands below run from the repository root in Bash.
 
-Use the [standalone command](#run-the-v1-example) for inference or the
-[OneRec-1.7B asynchronous scheduling quickstart](../../../docs/onerec_v1_async_quickstart.md)
-to generate and use a Constraint Table. The legacy `offline_beam_search.py`
-example is retired.
+## Run the V1 example
 
-## Installation
+Install the [CUDA](../../../docs/quickstart.md) or
+[Ascend](../../../docs/quickstart-ascend.md) runtime and set `ONEREC_MODEL`
+to a local OneRec-1.7B snapshot with its tokenizer. See the
+[model preparation steps](../../README.md#run-onerec-offline) to set the path
+or download the snapshot. On CUDA, use the default backend.
 
-Install `vllm-gr` and its runtime dependencies using
-[`docs/quickstart.md`](../../../docs/quickstart.md).
+```bash
+python examples/offline_inference/beam_search/quickstart.py --model "$ONEREC_MODEL"
+```
+
+On Ascend, add `--constraint-backend npu --execution eager`. The script uses
+ModelRunner V1 on Ascend and defaults to V2 on CUDA. See
+[ModelRunner selection](../../README.md#choose-a-modelrunner) for the CUDA override.
+
+The default prompt is `Recommend the next video.` The script prints
+`request=0 returned_beams=128` for the first request, followed by the five
+highest-ranked candidates with `beam_tokens` and `cumulative_logprob`. The
+token list includes the OneRec boundary markers. `--beam-width` sets the
+maximum number of beams retained at each step, and `--print-beams` limits the
+number of rows shown per request.
+
+Pass `--prompt` with a UTF-8 file to use a custom prompt at its natural token
+length. The command's help lists the available options.
+
+```bash
+python examples/offline_inference/beam_search/quickstart.py --help
+```
+
+## Run with a Constraint Table
+
+Use two synthetic SIDs to check catalog membership without downloading the
+OneRec dataset. The following commands write a prompt and convert the raw
+catalog into constraint triples.
+
+```bash
+export ONEREC_WORKDIR="$PWD/results/onerec-example"
+mkdir -p "$ONEREC_WORKDIR"
+printf '%s' 'Recommend the next video.' > "$ONEREC_WORKDIR/prompt.txt"
+cat > "$ONEREC_WORKDIR/catalog.json" <<'JSON'
+[
+  ["<|sid_begin|>", "<s_a_1>", "<s_b_2>", "<s_c_3>", "<|sid_end|>"],
+  ["<|sid_begin|>", "<s_a_1>", "<s_b_2>", "<s_c_4>", "<|sid_end|>"]
+]
+JSON
+python tools/build_constraint_triples.py \
+  --catalog "$ONEREC_WORKDIR/catalog.json" \
+  --output "$ONEREC_WORKDIR/constraint_triples.json" \
+  --begin '<|sid_begin|>' --end '<|sid_end|>'
+```
+
+With `ONEREC_MODEL` set as above, run both commands with the same prompt.
+On Ascend, append `--constraint-backend npu --execution eager` to both commands.
+
+```bash
+python examples/offline_inference/beam_search/quickstart.py \
+  --model "$ONEREC_MODEL" --prompt "$ONEREC_WORKDIR/prompt.txt"
+
+python examples/offline_inference/beam_search/quickstart.py \
+  --model "$ONEREC_MODEL" --prompt "$ONEREC_WORKDIR/prompt.txt" \
+  --catalog "$ONEREC_WORKDIR/constraint_triples.json"
+```
+
+The converter's `--catalog` reads the raw `catalog.json`. The quickstart's
+`--catalog` reads `constraint_triples.json` and compiles a temporary table with
+the model's tokenizer. Both runs encode the prompt at its natural length.
+
+The full-vocabulary run prints `beam_tokens` and can return candidates outside
+the catalog. In the constrained run, check that each `sid_tokens` list matches
+one of the two catalog entries, including the boundary markers. The small
+catalog can return fewer than 128 candidates, and the model and prompt determine
+their ranking.
+
+To use your own catalog or the full OneRec mapping, follow the
+[catalog conversion steps](../../online_serving/catalog/README.md#compile-the-constraint-table)
+through the triples step and use the resulting file in the constrained command.
+The same guide shows how to compile a persistent table for online serving.
 
 ## Beam Search V1
 
@@ -64,32 +133,13 @@ example CLI accepts 1 to 3.
 
 ### Constraint Table artifact
 
-Use the [OneRec catalog converter](../../../benchmarks/open_one_rec/tools/README.md)
-to generate a catalog JSON from `sid2pid.json`, or supply your own SID sequences
-with begin and end markers. Extract the triples from that catalog.
+Follow the [catalog conversion steps](../../online_serving/catalog/README.md#compile-the-constraint-table)
+to generate constraint triples and, if needed, save a reusable artifact.
+The offline examples compile a temporary table when passed the triples.
 
-```bash
-python tools/build_constraint_triples.py \
-  --catalog /path/to/video_catalog.json \
-  --output /path/to/video_constraint_triples.json \
-  --begin '<|sid_begin|>' \
-  --end '<|sid_end|>'
-```
-
-`offline_beam_search_v1.py` compiles a temporary table from the triples.
-To save a reusable artifact, run the compiler directly.
-
-```bash
-python tools/build_constraint_table.py \
-  --triples /path/to/video_constraint_triples.json \
-  --model /path/to/OneRec-1.7B \
-  --output /path/to/video_constraint_table.safetensors \
-  --trust-remote-code
-```
-
-The command prints `artifact_digest` and `tokenizer_digest`. Both values belong
-in the canonical configuration and prevent loading a table built from different
-constraint data or a different tokenizer.
+The table compiler prints `artifact_digest` and `tokenizer_digest`. Both values
+belong in the canonical configuration and prevent loading a table built from
+different constraint data or a different tokenizer.
 
 ### Engine configuration
 
@@ -210,59 +260,6 @@ N = max_tokens - begin_token_position - end_token_position
 
 With both OneRec boundary tokens, `max_tokens=5` represents three generated SID
 tokens and an effective V1 budget of 3.
-
-### Run the V1 example
-
-Run from the repository root with a local OneRec snapshot and tokenizer.
-On CUDA, the script defaults to ModelRunner V2.
-
-```bash
-python examples/offline_inference/beam_search/quickstart.py \
-  --model /path/to/OneRec-1.7B
-```
-
-On Ascend, add `--constraint-backend npu --execution eager`. Ascend uses
-ModelRunner V1. See [ModelRunner selection](../../README.md#choose-a-modelrunner)
-for the CUDA override.
-
-The default run prints `request=0 returned_beams=128`, followed by five JSON
-rows with scores and `beam_tokens`, including the OneRec boundary markers.
-`--beam-width` sets the maximum number of beams retained at each step in
-this fixed-width search. `--print-beams` caps the number of result rows printed
-per request. To show only the top candidate, pass `--print-beams 1`.
-
-The default prompt is `Recommend the next video.` Pass
-`--prompt /path/to/prompt.txt` to read UTF-8 input. The quickstart encodes the
-full prompt at its natural length. Use `offline_beam_search_v1.py --input-len 1024`
-for fixed-length benchmark inputs. Full-vocabulary search can
-return invalid SIDs. Use a [Constraint Table](#run-with-a-constraint-table)
-to restrict output to your catalog. Run with `--help` for the remaining options.
-
-Full-vocabulary Beam Search accepts 1 to 3 generated steps in this example.
-With three steps, the NPU run performs Prefill followed by two
-Decode stages. Graph mode checks that the requested Beam graph shape was
-captured and replayed. The `fallbacks` counter records dispatches that did not
-use Beam FULL graphs, including dispatches on the native PIECEWISE path.
-
-### Run with a Constraint Table
-
-Generate triples JSON from your item catalog using the
-[catalog conversion commands](../../online_serving/catalog/README.md#compile-the-constraint-table).
-For offline inference, the first two commands produce the triples JSON.
-Pass that file with `--catalog` and the script will compile the table with the
-inference model's tokenizer.
-
-```bash
-python examples/offline_inference/beam_search/offline_beam_search_v1.py \
-  --model /path/to/OneRec-1.7B \
-  --catalog /path/to/constraint_triples.json
-```
-
-On Ascend, add `--constraint-backend npu --execution eager`.
-
-This mode requires three generated steps and prints `sid_tokens`. A small
-catalog may have too few reachable candidates to fill `--beam-width`.
-Use `--print-beams` to limit the rows shown.
 
 ### Optional thinking before SID generation
 
@@ -426,6 +423,11 @@ of the combined workflow is not included.
 
 ### NPU graph correctness regression
 
+With three generated steps, the NPU run performs Prefill followed by two
+Decode stages. Graph mode checks that the requested Beam graph shape was
+captured and replayed. The `fallbacks` counter includes dispatches on the
+native PIECEWISE path and other dispatches that did not use Beam FULL graphs.
+
 The focused CPU tests cover flat EngineArgs B=1/2/4 preservation, Prefill-only
 example output, native NONE/PIECEWISE/FULL shape misses, and captured-context
 reuse across B=2 -> B=1 -> B=2. They do not load a model or execute NPU kernels.
@@ -475,6 +477,9 @@ For the same-input exact-bucket control, set both bucket values to `290`.
 The default regression exercises a different, exact 256-token batch.
 
 ### Measure latency without profiling
+
+Use `--input-len` with `offline_beam_search_v1.py` to set a fixed prompt length
+that includes the SID begin token. Its default is 1024 tokens.
 
 Use `--repeat 20 --warmup-runs 3` to time 20 complete API calls after three
 untimed warmup batches, without configuring a profiler. Each call submits

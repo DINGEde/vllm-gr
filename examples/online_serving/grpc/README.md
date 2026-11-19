@@ -61,17 +61,17 @@ python examples/online_serving/grpc/client.py \
   --batch-size 1 --width 128 --max-new-tokens 3 \
   > "$ONEREC_WORKDIR/grpc-result.json" \
 && python examples/online_serving/catalog/verify_catalog.py \
-  "$ONEREC_WORKDIR/grpc-result.json" "$ONEREC_WORKDIR/catalog.json" --expected-count 128
+  "$ONEREC_WORKDIR/grpc-result.json" "$ONEREC_WORKDIR/catalog.json"
 ```
 
 Before calling `GenerateBatch`, the client appends the SID begin token to the
 prompt. The server returns three generated token IDs per beam. The client wraps
-them in boundary tokens for verification. The verifier prints
-`SUCCESS: All 128 generated SIDs exist in the catalog.` when all results pass.
+them in boundary tokens for verification. The verifier reports the actual
+number of SIDs when all returned choices pass. See
+[saved response verification](../catalog/README.md#verify-a-saved-response)
+to also assert an expected count.
 To change the width, [update the server YAML and capacity flags](../catalog/README.md#change-the-beam-width)
-and pass the matching value with `--width`. The client reports the beams
-actually returned. With your own catalog, omit `--expected-count` if the
-number of reachable SIDs can vary.
+and pass the matching value with `--width`.
 
 Press Ctrl+C in the server terminal to stop the service.
 

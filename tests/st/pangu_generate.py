@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM-GR project
 
-"""Offline inference example for Pangu Embedded 1B via vllm-gr.
+"""Evaluate offline GSM8K-mini accuracy for Pangu Embedded 1B via vllm-gr.
 
 Uses ``GRLLM`` class without a dedicated adapter. Requests are routed through
 the standard vLLM generate path. Pass recommended engine flags explicitly
@@ -10,7 +10,7 @@ the standard vLLM generate path. Pass recommended engine flags explicitly
 
 Example::
 
-    python examples/offline_inference/pangu1b/pangu_generate.py \\
+    python tests/st/pangu_generate.py \\
         --model /path/to/openPangu-Embedded-1B-V1.1 \\
         --dataset-path tests/resources/pangu1b/gsm8k_mini.json \\
         --num-prompts 8
@@ -32,8 +32,7 @@ import regex as re
 
 logger = logging.getLogger(__name__)
 
-_EXAMPLE_DIR = Path(__file__).resolve().parent
-_REPO_ROOT = _EXAMPLE_DIR.parents[2]
+_REPO_ROOT = Path(__file__).resolve().parents[2]
 _DEFAULT_DATASET = _REPO_ROOT / "tests" / "resources" / "pangu1b" / "gsm8k_mini.json"
 _ANSWER_RE = re.compile(r"-?\d+(?:\.\d+)?(?:/\d+)?")
 
