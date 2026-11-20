@@ -17,7 +17,7 @@ from unittest import mock
 import pytest
 
 from tests.helpers.gr_config import engine_args_from_file
-from tests.helpers.paths import TESTS_DIR
+from tests.helpers.paths import REPO_ROOT, TESTS_DIR
 from vllm_gr.config import (
     CONSTRAINT_TABLE_FORMAT,
     ConstraintTableBackendEnum,
@@ -531,6 +531,7 @@ def test_benchmark_server_command_uses_canonical_attention_backend(
     from vllm.engine.arg_utils import EngineArgs
     from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
+    from benchmarks.open_one_rec.tasks.recommendation.config import VIDEO_CONFIG
     from vllm_gr.engine import arg_utils_gr
     from vllm_gr.entrypoints.cli.main import _add_mode_option, _mode_arguments
     from vllm_gr.entrypoints.cli.serve import GRServeSubcommand
@@ -567,6 +568,7 @@ def test_benchmark_server_command_uses_canonical_attention_backend(
             "gr_overrides": json.dumps(overrides),
             "run_port": "7000",
             "MODEL_PATH": str(tmp_path),
+            "SCRIPT_DIR": str(TESTS_DIR / "system"),
         },
         capture_output=True,
         check=True,
@@ -581,6 +583,9 @@ def test_benchmark_server_command_uses_canonical_attention_backend(
     selected, serve_argv = _mode_arguments(argv[2:])
     assert selected
     args = parser.parse_args(serve_argv)
+    template_name = VIDEO_CONFIG["prompt_config"]["custom_chat_template"]
+    offline_template = REPO_ROOT / "benchmarks/open_one_rec" / template_name
+    assert Path(args.chat_template).samefile(offline_template)
     serve.validate(args)
     # ServeSubcommand.cmd normally normalizes the positional model before
     # constructing EngineArgs. Keep this config-only test local and offline.

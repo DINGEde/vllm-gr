@@ -256,6 +256,7 @@ python -m vllm_gr.entrypoints.cli.main serve --gr "$MODEL_PATH" \
   --no-enable-chunked-prefill \
   --port "$run_port" \
   --seed 123 \
+  --chat-template "$SCRIPT_DIR/../../benchmarks/open_one_rec/qwen3_soft_switch.jinja2" \
   --default-chat-template-kwargs '{"enable_thinking": false}' \
   --max-logprobs 512 \
   --max_num_seqs 2048 \
