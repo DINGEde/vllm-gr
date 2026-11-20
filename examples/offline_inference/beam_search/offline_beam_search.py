@@ -31,7 +31,7 @@ def parse_args(*, quickstart: bool = False) -> argparse.Namespace:
     parser.add_argument(
         "--catalog",
         type=Path,
-        help="Enable a Constraint Table from triples JSON (required only with --cot)",
+        help="Constraint triples JSON (default: full-vocabulary Beam Search; required with --cot)",
     )
     parser.add_argument(
         "--constraint-backend",
@@ -471,7 +471,10 @@ def build_artifact(
 
 
 def make_prompt(tokenizer: Any, path: Path | None, input_len: int | None) -> list[int]:
-    text = DEFAULT_PROMPT if path is None else path.read_text(encoding="utf-8")
+    text = DEFAULT_PROMPT
+    if path is not None:
+        with path.open(encoding="utf-8", newline="") as prompt_file:
+            text = prompt_file.read()
     source = tokenizer.encode(text, add_special_tokens=False)
     if input_len is None:
         return [int(token) for token in source]

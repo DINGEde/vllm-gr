@@ -37,20 +37,15 @@ python examples/offline_inference/beam_search/quickstart.py --help
 
 ## Run with a Constraint Table
 
-Use two synthetic SIDs to check catalog membership without downloading the
-OneRec dataset. The following commands write a prompt and convert the raw
-catalog into constraint triples.
+Use the [two-SID sample catalog](../../online_serving/catalog/sample_catalog.json)
+to check catalog membership without downloading the OneRec dataset. The
+following commands write a prompt and convert the raw catalog into triples.
 
 ```bash
 export ONEREC_WORKDIR="$PWD/results/onerec-example"
 mkdir -p "$ONEREC_WORKDIR"
 printf '%s' 'Recommend the next video.' > "$ONEREC_WORKDIR/prompt.txt"
-cat > "$ONEREC_WORKDIR/catalog.json" <<'JSON'
-[
-  ["<|sid_begin|>", "<s_a_1>", "<s_b_2>", "<s_c_3>", "<|sid_end|>"],
-  ["<|sid_begin|>", "<s_a_1>", "<s_b_2>", "<s_c_4>", "<|sid_end|>"]
-]
-JSON
+cp examples/online_serving/catalog/sample_catalog.json "$ONEREC_WORKDIR/catalog.json"
 python tools/build_constraint_triples.py \
   --catalog "$ONEREC_WORKDIR/catalog.json" \
   --output "$ONEREC_WORKDIR/constraint_triples.json" \
@@ -79,9 +74,16 @@ one of the two catalog entries, including the boundary markers. The small
 catalog can return fewer than 128 candidates, and the model and prompt determine
 their ranking.
 
-To use your own catalog or the full OneRec mapping, follow the
-[catalog conversion steps](../../online_serving/catalog/README.md#compile-the-constraint-table)
-through the triples step and use the resulting file in the constrained command.
+The [HTTP quickstart](../../online_serving/beam_search/README.md#use-your-own-inputs)
+accepts the same model, natural-length prompt and triples. It uses the two-SID
+sample by default and checks the response against the original catalog.
+
+To use your own catalog or the full OneRec mapping, start by
+[setting the model and dataset paths](../../online_serving/catalog/README.md#set-the-model-and-dataset-paths).
+When switching from the sample to the full dataset, set `ONEREC_DATA` and
+choose a new `ONEREC_WORKDIR`. Generate `catalog.json` from the full mapping,
+then regenerate `constraint_triples.json` from that catalog. Pass the new
+triples file to the constrained command.
 The same guide shows how to compile a persistent table for online serving.
 
 ## Beam Search V1
@@ -133,8 +135,8 @@ example CLI accepts 1 to 3.
 
 ### Constraint Table artifact
 
-Follow the [catalog conversion steps](../../online_serving/catalog/README.md#compile-the-constraint-table)
-to generate constraint triples and, if needed, save a reusable artifact.
+Start by [setting the model and dataset paths](../../online_serving/catalog/README.md#set-the-model-and-dataset-paths).
+The guide shows how to generate constraint triples and save a reusable artifact.
 The offline examples compile a temporary table when passed the triples.
 
 The table compiler prints `artifact_digest` and `tokenizer_digest`. Both values

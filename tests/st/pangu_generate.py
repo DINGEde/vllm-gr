@@ -24,18 +24,18 @@ import logging
 import os
 import sys
 import time
-from fractions import Fraction
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-import regex as re
+if TYPE_CHECKING or __package__:
+    from . import pangu1b_st_common as pangu
+else:
+    import pangu1b_st_common as pangu  # Direct invocation via tests/st/pangu_generate.py.
 
 logger = logging.getLogger(__name__)
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
-_PANGU_CONFIG = _REPO_ROOT / "configs" / "pangu1b.yaml"
-_DEFAULT_DATASET = _REPO_ROOT / "tests" / "resources" / "pangu1b" / "gsm8k_mini.json"
-_ANSWER_RE = re.compile(r"-?\d+(?:\.\d+)?(?:/\d+)?")
+_DEFAULT_DATASET = _REPO_ROOT / pangu.GSM8K_MINI
 
 
 def _is_npu_platform() -> bool:
@@ -50,7 +50,7 @@ def _is_npu_platform() -> bool:
 def _pangu_engine_kwargs(block_size: int | None = None) -> dict[str, Any]:
     """Recommended vLLM engine flags for openPangu Embedded 1B."""
     kwargs: dict[str, Any] = {
-        "config": _PANGU_CONFIG,
+        "config": _REPO_ROOT / pangu.PANGU_CONFIG,
         "trust_remote_code": True,
         "dtype": "bfloat16",
         "max_model_len": int(os.environ.get("PANGU1B_MAX_MODEL_LEN", "32768")),
@@ -82,58 +82,6 @@ def _resolve_dataset_path(path: str | Path) -> Path:
     return candidate
 
 
-def _normalize_numeric(value: str) -> str:
-    text = value.strip().replace(",", "")
-    if "/" in text:
-        try:
-            return str(Fraction(text).limit_denominator())
-        except (ValueError, ZeroDivisionError):
-            return text
-    if text.endswith(".0"):
-        text = text[:-2]
-    return text
-
-
-def extract_final_answer(text: str) -> str | None:
-    """Extract answer from \boxed{} notation, with fallback to last number."""
-    text_clean = text.replace(",", "")
-
-    # Priority 1: Try \boxed{} notation first (explicit answer marker)
-    match = re.search(r"\\boxed\{([^}]+)\}", text)
-    if match:
-        boxed_content = match.group(1)
-        numbers = _ANSWER_RE.findall(boxed_content)
-        if numbers:
-            return _normalize_numeric(numbers[0])
-
-    # Priority 2: Fall back to last numeric token
-    matches = _ANSWER_RE.findall(text_clean)
-    if not matches:
-        return None
-    return _normalize_numeric(matches[-1])
-
-
-def load_dataset(path: Path, num_prompts: int | None) -> list[dict[str, Any]]:
-    if not path.is_file():
-        raise FileNotFoundError(f"Dataset not found: {path}")
-    raw = path.read_text(encoding="utf-8").strip()
-    if not raw:
-        raise ValueError(f"Dataset is empty: {path}")
-    try:
-        records = json.loads(raw)
-    except json.JSONDecodeError as exc:
-        raise ValueError(f"Dataset is not valid JSON: {path}") from exc
-    if not isinstance(records, list):
-        raise ValueError(f"Dataset must be a JSON list: {path}")
-    if num_prompts is not None:
-        records = records[:num_prompts]
-    return records
-
-
-def build_prompt(question: str) -> str:
-    return f"Question: {question}\nAnswer:"
-
-
 def run_offline_eval(
     *,
     model: str,
@@ -152,7 +100,7 @@ def run_offline_eval(
     except ImportError as exc:
         raise RuntimeError("vLLM and vllm-gr are required for Pangu offline inference.") from exc
 
-    records = load_dataset(dataset_path, num_prompts)
+    records = pangu.load_dataset(dataset_path, num_prompts)
     if not records:
         raise ValueError(f"No records loaded from {dataset_path}")
 
@@ -170,26 +118,16 @@ def run_offline_eval(
         top_p=1.0,
     )
 
-    prompts = [build_prompt(str(row["question"])) for row in records]
+    prompts = [pangu.build_prompt(str(row["question"])) for row in records]
     outputs = llm.generate(prompts, sampling_params=sampling, use_tqdm=False)
 
     correct = 0
     details: list[dict[str, Any]] = []
     for row, request_output in zip(records, outputs):
-        expected = _normalize_numeric(str(row["answer"]))
         generated = request_output.outputs[0].text if request_output.outputs else ""
-        predicted = extract_final_answer(generated)
-        is_correct = predicted == expected
-        correct += int(is_correct)
-        details.append(
-            {
-                "id": row.get("id"),
-                "expected": expected,
-                "predicted": predicted,
-                "correct": is_correct,
-                "generated": generated,
-            }
-        )
+        score = pangu.score_answer(generated, str(row["answer"]))
+        correct += score["correct"]
+        details.append({"id": row.get("id"), **score, "generated": generated})
 
     elapsed = time.time() - start
     total = len(records)

@@ -27,10 +27,15 @@ import pytest
 
 from tests.helpers.paths import REPO_ROOT
 from tests.st import pangu_generate
-from tests.st.pangu1b_st_common import get_model_path, require_pangu_st_runtime
+from tests.st.pangu1b_st_common import (
+    GSM8K_MINI,
+    get_model_path,
+    require_pangu_st_runtime,
+    score_answer,
+)
 
 ROOT = REPO_ROOT
-DEFAULT_DATASET = ROOT / "tests" / "resources" / "pangu1b" / "gsm8k_mini.json"
+DEFAULT_DATASET = ROOT / GSM8K_MINI
 DEFAULT_MIN_ACCURACY = os.environ.get(
     "PANGU1B_OFFLINE_ACCURACY_THRESHOLD",
     os.environ.get("PANGU1B_MIN_ACCURACY", "0.5"),
@@ -133,10 +138,18 @@ class TestPangu1bAccuracyUnitHooks(unittest.TestCase):
                     require_pangu_st_runtime()
 
     def test_extract_final_answer(self) -> None:
-        self.assertEqual(
-            pangu_generate.extract_final_answer("Step by step ... answer is 42."), "42"
-        )
-        self.assertEqual(pangu_generate.extract_final_answer("She ate 3/8 of the pizza."), "3/8")
+        for generated, reference, expected, predicted, correct in (
+            ("Step by step ... answer is 42.", "42.0", "42", "42", True),
+            (r"She ate \boxed{3/8} and left 5 pieces.", "6/16", "3/8", "3/8", True),
+            (r"The answer was \boxed{1,2}.", "12", "12", "1", False),
+            ("The total was 1,020.", "1,021", "1021", "1020", False),
+            ("I cannot tell.", "0", "0", None, False),
+        ):
+            with self.subTest(generated=generated):
+                self.assertEqual(
+                    score_answer(generated, reference),
+                    {"expected": expected, "predicted": predicted, "correct": correct},
+                )
 
     def test_npu_defaults_to_compatible_block_size(self) -> None:
         with mock.patch.object(pangu_generate, "_is_npu_platform", return_value=True):

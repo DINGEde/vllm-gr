@@ -1898,8 +1898,6 @@
     "tests/tools/test_build_constraint_triples.py::test_rejects_wrong_semantic_depth": "l1",
     "tests/tools/test_build_constraint_triples.py::test_strips_consistent_begin_end_sentinels": "l1",
     "tests/tools/test_build_constraint_triples.py::test_triples_and_relations_are_order_independent": "l1",
-    "tests/tools/test_examples_online_serving.py::test_beam_client_sends_valid_request_from_other_directory": "l1",
-    "tests/tools/test_examples_online_serving.py::test_catalog_verifier_reports_failure_for_invalid_results": "l1",
     "tests/tools/test_prepare_pangu_sid.py::test_bad_tied_head_leaves_failure_evidence_without_final_output": "l1",
     "tests/tools/test_prepare_pangu_sid.py::test_conversion_preserves_source_and_extends_real_tokenizer": "l1",
     "tests/tools/test_prepare_pangu_sid.py::test_dangling_output_symlink_is_not_replaced": "l1",

@@ -84,7 +84,7 @@ Each replica has its own EngineCore, GPU and KV cache.
 
 ### Start two replicas
 
-Prepare the [canonical V1 configuration](https://github.com/JiusiServe/vllm-gr/blob/main/examples/online_serving/beam_search/README.md#prepare-the-environment-and-inputs).
+Prepare the [OneRec serving configuration](https://github.com/JiusiServe/vllm-gr/blob/main/examples/online_serving/beam_search/README.md#prepare-a-persistent-service).
 Use the same model, served name and config for both replicas. In two terminals
 run the [V1 server command](https://github.com/JiusiServe/vllm-gr/blob/main/examples/online_serving/beam_search/README.md#start-the-server)
 with these additions:
@@ -150,7 +150,7 @@ installation may require elevated privileges for its default PID and log paths:
 sudo nginx -c /absolute/path/to/nginx_vllm.conf -g 'daemon off;'
 ```
 
-Use the [V1 client request](https://github.com/JiusiServe/vllm-gr/blob/main/examples/online_serving/beam_search/README.md#send-a-request-and-verify-the-result)
+Use the [HTTP client request](https://github.com/JiusiServe/vllm-gr/blob/main/examples/online_serving/beam_search/README.md#send-a-request-and-verify-the-result)
 against `http://127.0.0.1:8000/v1/completions`. For load testing, use the
 [HTTP throughput benchmark](../usage/benchmarks/throughput.md) with the proxy's host
 and port.

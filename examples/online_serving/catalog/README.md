@@ -1,22 +1,68 @@
 # Prepare a Constraint Table for OneRec serving
 
-Use a OneRec SID catalog to build the constraint triples used by offline
-inference and the persistent Constraint Table used by online serving. Run
-the commands from the repository root in Bash.
+The **raw catalog** lists five-token OneRec SIDs, including their begin and
+end markers. It lets the verifier check the generated SIDs against the source
+data. **Constraint triples** describe the three inner components and are the
+input to offline `quickstart.py --catalog`. The **Constraint Table** is a
+compiled safetensors artifact that HTTP and gRPC servers load with a YAML
+configuration. Build it with the tokenizer from the model you will serve.
+
+## Prepare a serving configuration
+
+Set `ONEREC_MODEL` to a [local OneRec snapshot](../../README.md#run-onerec-offline).
+In Bash at the repository root, choose an output directory and a device
+backend. On Ascend set `ONEREC_BACKEND=npu`.
+
+```bash
+export ONEREC_WORKDIR="$PWD/results/onerec-serving"
+export ONEREC_BACKEND="${ONEREC_BACKEND:-cuda}"
+export ONEREC_VERIFY_CATALOG="$PWD/examples/online_serving/catalog/sample_catalog.json"
+python -m examples.online_serving.catalog.prepare_serving_config \
+  --model "$ONEREC_MODEL" --constraint-backend "$ONEREC_BACKEND" \
+  --workdir "$ONEREC_WORKDIR"
+```
+
+The command uses the two-SID sample by default. It prints the paths of the
+compiled table and `$ONEREC_WORKDIR/vllm_gr_config.yaml`. The YAML includes
+the table's absolute path and both artifact and tokenizer digests. Use it to
+[serve over HTTP](../beam_search/README.md#start-the-server) or
+[serve over gRPC](../grpc/README.md#serve-onerec-over-grpc).
+
+To use other inputs, change the command above as follows. Keep
+`ONEREC_VERIFY_CATALOG` for the client terminal when verifying a response.
+
+| Source | Argument to add | `ONEREC_VERIFY_CATALOG` for verification |
+| --- | --- | --- |
+| Built-in sample | Omit the input argument | The sample path exported above |
+| Your raw SID catalog | `--raw-catalog /path/to/catalog.json` | That same raw catalog path |
+| Previously generated triples | `--triples /path/to/constraint_triples.json` | The original raw catalog used to produce those triples |
+
+The preparer can compile triples on their own. To verify a response you also
+need the matching raw catalog. For the [offline example](../../offline_inference/beam_search/README.md#run-with-a-constraint-table),
+this is `catalog.json` beside `constraint_triples.json`.
+
+The following sections give the individual commands for converting a dataset,
+compiling a table, and writing the same server configuration manually.
 
 ## Set the model and dataset paths
 
-Use the default output directory for a fresh serving setup. To reuse the
-[two-SID offline example](../../offline_inference/beam_search/README.md#run-with-a-constraint-table)
-in a new shell, set `ONEREC_WORKDIR` to `$PWD/results/onerec-example` first.
-If that directory already contains `constraint_triples.json`, start at
-[Compile a persistent table for serving](#compile-a-persistent-table-for-serving)
-after the setup below. Otherwise, place your catalog in the output directory
-or generate one from the OneRec mapping.
+Use the default work directory below for a fresh setup. To reuse the
+[two-SID offline example](../../offline_inference/beam_search/README.md#run-with-a-constraint-table),
+set `ONEREC_WORKDIR="$PWD/results/onerec-example"` first. Skip directly to
+[compiling the table](#compile-a-persistent-table-for-serving) only if you know
+that the existing triples were generated from the exact raw catalog you intend
+to serve and verify.
 
-For serving, use the local snapshot for `ONEREC_MODEL` and set `ONEREC_BACKEND`
-to `npu` on Ascend. Set `ONEREC_DATA` if you are generating a catalog from the
-dataset. See the
+To switch from the sample to the full dataset, set `ONEREC_DATA` to the local
+dataset directory, choose a fresh `ONEREC_WORKDIR`, and start at
+[Build a catalog from the OneRec dataset](#build-a-catalog-from-the-onerec-dataset).
+Regenerate both the catalog and its triples before compiling the table.
+For a different raw catalog you already have, place it at
+`$ONEREC_WORKDIR/catalog.json` and start at
+[Extract constraint triples from the catalog](#extract-constraint-triples-from-the-catalog).
+
+Use the local snapshot for `ONEREC_MODEL` and set `ONEREC_BACKEND` to
+`npu` on Ascend. See the
 [download instructions](../../../docs/getting_started/quickstart.md#1-check-the-environment)
 if you need the model or mapping.
 
@@ -25,6 +71,7 @@ export ONEREC_MODEL="${ONEREC_MODEL:-/absolute/path/to/OneRec-1.7B}"
 export ONEREC_DATA="${ONEREC_DATA:-/absolute/path/to/OpenOneRec-RecIF}"
 export ONEREC_WORKDIR="${ONEREC_WORKDIR:-$PWD/results/onerec-serving}"
 export ONEREC_BACKEND="${ONEREC_BACKEND:-cuda}"
+export ONEREC_VERIFY_CATALOG="$ONEREC_WORKDIR/catalog.json"
 mkdir -p "$ONEREC_WORKDIR"
 ```
 
@@ -136,7 +183,7 @@ OneRec three-layer SIDs with begin and end markers.
 
 ```bash
 python examples/online_serving/catalog/verify_catalog.py \
-  "$ONEREC_WORKDIR/result.json" "$ONEREC_WORKDIR/catalog.json"
+  "$ONEREC_WORKDIR/result.json" "$ONEREC_VERIFY_CATALOG"
 ```
 
 The verifier reads `choices[].text` from a Completions response. It also

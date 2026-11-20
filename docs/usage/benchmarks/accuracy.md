@@ -40,15 +40,51 @@ python -m benchmarks.open_one_rec.one_rec_acc_test \
 
 ### 2. Online, API Server Mode (Production-like)
 
-Start the server with the [canonical online Beam configuration](https://github.com/JiusiServe/vllm-gr/blob/main/examples/online_serving/beam_search/README.md#start-the-server).
-The accuracy client uses `--model` both as the API model name and to load the tokenizer,
-so use the same accessible model ID or snapshot path on both sides. For this
-example, pass `--served-model-name "$ONEREC_MODEL"` and
-`--chat-template benchmarks/open_one_rec/qwen3_soft_switch.jinja2` to the
-server. The client sends the source chat turns and the task's thinking
-setting. `--chat-template-kwargs` can override that setting for an online run.
+#### Terminal 1 — Prepare the full catalog and start the server
+
+Run these commands from the repository root in Bash on CUDA. Set
+`ONEREC_MODEL` to your local model snapshot, download the dataset to
+`./data`, and apply the [CLI dispatch patch](../../cli/README.md#enable-gr-dispatch).
+The video benchmark requires exactly 128 choices per request. Build the
+serving table from the full dataset's video SID mapping.
+
+```bash
+export ONEREC_DATA="$PWD/data"
+export ONEREC_WORKDIR="$PWD/results/onerec-accuracy"
+mkdir -p "$ONEREC_WORKDIR"
+
+python benchmarks/open_one_rec/tools/convert_catalog.py \
+  --dataset-path "$ONEREC_DATA/benchmark_data" \
+  --output-path "$ONEREC_WORKDIR/catalog.json" &&
+python -m examples.online_serving.catalog.prepare_serving_config \
+  --model "$ONEREC_MODEL" \
+  --workdir "$ONEREC_WORKDIR" \
+  --raw-catalog "$ONEREC_WORKDIR/catalog.json"
+```
+
+After preparation succeeds, start the server with the generated YAML.
+The accuracy client uses `--model` as both the API model name and the
+tokenizer source. Use the same model snapshot path in both terminals.
+The client sends the source chat turns and the task's thinking setting.
+`--chat-template-kwargs` can override that setting for an online run.
+
+```bash
+VLLM_USE_V2_MODEL_RUNNER="${VLLM_USE_V2_MODEL_RUNNER:-1}" vllm serve "$ONEREC_MODEL" --gr \
+  --host 127.0.0.1 --port 8000 \
+  --served-model-name "$ONEREC_MODEL" \
+  --config "$ONEREC_WORKDIR/vllm_gr_config.yaml" \
+  --chat-template benchmarks/open_one_rec/qwen3_soft_switch.jinja2 \
+  --trust-remote-code \
+  --max-logprobs 128 --max-num-seqs 128 \
+  --max-model-len 8192 --max-num-batched-tokens 8192 \
+  --async-scheduling --no-enable-chunked-prefill
+```
 
 #### Terminal 2 — Run the accuracy benchmark against the server
+
+Once the server is ready, pass `./data/benchmark_data` to the accuracy
+client. In the downloaded checkout, this directory contains both
+`video/video_test.parquet` and `sid2pid.json`.
 
 ```bash
 export ONEREC_MODEL=/absolute/path/to/OneRec-1.7B
@@ -56,12 +92,14 @@ python -m benchmarks.open_one_rec.one_rec_acc_test \
   --endpoint /v1/chat/completions \
   --model "$ONEREC_MODEL" \
   --dataset-name onerec \
-  --dataset-path ./data \
+  --dataset-path ./data/benchmark_data \
   --task-type video \
   --n 128 \
   --num-prompts 1000 \
   --result-dir results/acc_test_results
 ```
+
+For a one-request smoke run, set `--num-prompts 1` and keep `--n 128`.
 
 For an authenticated deployment, pass the configured key with `--api-key`.
 Use `--request-timeout` to override the default 180-second HTTP connect and

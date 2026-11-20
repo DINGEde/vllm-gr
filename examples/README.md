@@ -46,20 +46,39 @@ Full-vocabulary search can return candidates outside your catalog.
 [Try a small catalog](offline_inference/beam_search/README.md#run-with-a-constraint-table)
 to restrict the output to known items.
 
-- [Serve OneRec over HTTP and verify a response](online_serving/beam_search/README.md)
-- [Serve OneRec over gRPC](online_serving/grpc/README.md)
-- [Measure offline Beam Search latency](offline_inference/beam_search/README.md#measure-latency-without-profiling)
-- [Measure offline or online throughput](../docs/usage/benchmarks/throughput.md)
-- [Run offline Pangu inference](../docs/contributing/tools/pangu1b.md)
+## Run OneRec over HTTP
+
+Use the same local model and apply the
+[CLI dispatch patch](../docs/cli/README.md#enable-gr-dispatch). On Linux
+with Bash and curl 7.76 or later, run:
+
+```bash
+python examples/online_serving/beam_search/quickstart.py --model "$ONEREC_MODEL"
+```
+
+On Ascend, append `--constraint-backend npu`. The command starts a local
+server, sends one prompt, prints the returned SIDs, verifies them against the
+two-entry sample catalog, and stops the server. If both SIDs are returned, the
+last verification line reads `SUCCESS: All 2 generated SIDs exist in the catalog.`
+
+Both quickstarts accept `--prompt FILE` for a natural-length UTF-8 prompt
+and `--catalog FILE` for constraint triples. The offline default searches the
+full vocabulary. The HTTP default searches the sample catalog. To compare
+the two, supply the same model, prompt and triples to both. See the
+[HTTP guide](online_serving/beam_search/README.md) for custom inputs and
+instructions for keeping a server running.
+
+## Run gRPC
+
+- [Check the CUDA gRPC installation](online_serving/grpc/README.md#check-the-grpc-installation)
+  with two RPCs against a locally generated tiny Llama.
+- [Serve a real OneRec model over gRPC](online_serving/grpc/README.md#serve-onerec-over-grpc)
+  with the same catalog and server configuration as HTTP.
 
 ## Run Sidecar hot updates
 
-Copy the [configuration template](sidecar/config.py). Set each task's HDFS
-address and a cache directory that its target instances can read. Set each
-gRPC instance's management address to use its `gr.admin_port`. Run
-`vllm-gr-sidecar --config /path/to/config.py`. See the
-[deployment guide](../docs/features/hot-update.md#user-startup-and-publication-guide)
-for checkpoint rolling updates and online Trie switching.
+Follow the [Sidecar example](sidecar/README.md) to configure checkpoint and
+Trie updates for running gRPC instances and check the version on each instance.
 
 ## Choose a ModelRunner
 
@@ -80,3 +99,12 @@ Both runners use the same Beam Search API and `gr` configuration.
 CUDA Prefill and Decode capture policies differ by runner. See the
 [V2 integration guide](../docs/features/cuda-graphs.md#modelrunner-v2-multi-batch-execution) and
 [Prefill capture guide](../docs/features/cuda-graphs.md#prefill-capture-configuration).
+
+## Run Pangu offline
+
+Follow the [Pangu evaluation guide](../docs/contributing/tools/pangu1b.md#run-the-offline-accuracy-evaluation) to run GSM8K-mini with the local checkpoint.
+
+## Measure performance
+
+- [Measure offline Beam Search latency](offline_inference/beam_search/README.md#measure-latency-without-profiling)
+- [Measure offline or online throughput](../docs/usage/benchmarks/throughput.md)

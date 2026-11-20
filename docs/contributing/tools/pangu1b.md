@@ -38,7 +38,10 @@ python tests/st/pangu_generate.py \
 
 ## Online serving
 
-Start a local OpenAI-compatible server:
+Follow the [Ascend installation guide](../../getting_started/installation/ascend.md) and apply the
+[vLLM 0.30.0 CLI dispatch patch](../../cli/README.md#enable-gr-dispatch)
+in the serving environment so the native CLI recognizes `--gr`. Start a local
+OpenAI-compatible server on Ascend with the required KV cache block size.
 
 ```bash
 vllm serve "$PANGU1B_MODEL_PATH" --gr \
@@ -46,13 +49,14 @@ vllm serve "$PANGU1B_MODEL_PATH" --gr \
     --trust-remote-code \
     --dtype bfloat16 \
     --max-model-len 32768 \
+    --block-size 128 \
     --tokenizer-mode slow \
     --no-enable-chunked-prefill \
     --no-enable-prefix-caching
 ```
 
-Both entrypoints use `gr_config.yaml` to select native sampling and attention.
-Add `--block-size 128` to the serving command when running on Ascend NPU.
+Both entrypoints use [the Pangu configuration](https://github.com/JiusiServe/vllm-gr/blob/main/configs/pangu1b.yaml)
+to select native sampling and attention.
 
 Then send a chat completion request:
 
@@ -148,10 +152,9 @@ reports outside version control.
 
 ### Build a matching catalog and run Beam search
 
-Inference requires a working `vllm-gr` accelerator environment; follow the
-[CUDA quickstart](../../getting_started/installation/cuda.md) or
-[Ascend quickstart](../../getting_started/installation/ascend.md). Run these commands
-from the repository root, using the prepared model path above.
+Set up the inference runtime with the
+[Ascend installation guide](../../getting_started/installation/ascend.md). Run these commands from
+the repository root, using the prepared model path above.
 
 Every catalog token must match an atomic token in the prepared tokenizer.
 The following synthetic catalog contains all 8 x 8 x 8 combinations of
@@ -185,7 +188,7 @@ python examples/offline_inference/beam_search/offline_beam_search.py \
     --model "$PANGU_SID_MODEL_PATH" \
     --catalog artifacts/pangu-public-sid/constraint_triples.json \
     --prompt artifacts/pangu-public-sid/prompt.txt \
-    --constraint-backend cuda \
+    --constraint-backend npu --execution eager \
     --input-len 128 \
     --generated-steps 3 \
     --beam-width 32 \
@@ -193,9 +196,6 @@ python examples/offline_inference/beam_search/offline_beam_search.py \
     --max-model-len 2048 \
     --print-beams 5
 ```
-
-On Ascend NPU, replace `--constraint-backend cuda` with
-`--constraint-backend npu --execution eager`.
 
 The Beam example accepts the generated triples document, whose rows have
 `a`, `b`, and `c` token-string fields; it compiles the device Constraint

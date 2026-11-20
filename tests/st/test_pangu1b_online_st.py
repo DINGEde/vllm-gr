@@ -31,11 +31,18 @@ import pytest
 import requests
 
 from tests.helpers.paths import REPO_ROOT
-from tests.st import pangu_generate
-from tests.st.pangu1b_st_common import get_model_path, require_pangu_st_runtime
+from tests.st.pangu1b_st_common import (
+    GSM8K_MINI,
+    PANGU_CONFIG,
+    build_prompt,
+    get_model_path,
+    load_dataset,
+    require_pangu_st_runtime,
+    score_answer,
+)
 
 ROOT = REPO_ROOT
-DEFAULT_DATASET = ROOT / "tests" / "resources" / "pangu1b" / "gsm8k_mini.json"
+DEFAULT_DATASET = ROOT / GSM8K_MINI
 DEFAULT_SERVE_TIMEOUT = int(os.environ.get("PANGU1B_SERVE_TIMEOUT", "600"))
 SERVED_MODEL_NAME = os.environ.get("PANGU1B_SERVED_MODEL_NAME", "pangu1b-st")
 
@@ -68,7 +75,7 @@ def _build_serve_cmd(model_path: str, port: int) -> list[str]:
         "--gr",
         model_path,
         "--config",
-        str(pangu_generate._PANGU_CONFIG),
+        str(ROOT / PANGU_CONFIG),
         "--host",
         "127.0.0.1",
         "--port",
@@ -245,7 +252,7 @@ class TestPangu1bOnlineServeST(unittest.TestCase):
     def test_chat_completions_smoke(self) -> None:
         body = _chat_completion(
             self.base_url,
-            content="Question: What is 2 + 2?\nAnswer:",
+            content=build_prompt("What is 2 + 2?"),
             max_tokens=64,
         )
         message = body["choices"][0]["message"]
@@ -272,20 +279,17 @@ class TestPangu1bOnlineServeST(unittest.TestCase):
         self.assertEqual(response.status_code, 404)
 
     def test_gsm8k_mini_online_accuracy(self) -> None:
-        records = pangu_generate.load_dataset(DEFAULT_DATASET, num_prompts=8)
+        records = load_dataset(DEFAULT_DATASET, num_prompts=8)
         correct = 0
         for row in records:
             body = _chat_completion(
                 self.base_url,
-                content=pangu_generate.build_prompt(str(row["question"])),
+                content=build_prompt(str(row["question"])),
                 # Allow the model to finish its reasoning and final answer.
                 max_tokens=512,
             )
             generated = body["choices"][0]["message"].get("content") or ""
-            predicted = pangu_generate.extract_final_answer(generated)
-            expected = pangu_generate._normalize_numeric(str(row["answer"]))
-            if predicted == expected:
-                correct += 1
+            correct += score_answer(generated, str(row["answer"]))["correct"]
 
         accuracy = correct / len(records)
         result_path = os.environ.get("PANGU1B_ONLINE_RESULT_JSON")

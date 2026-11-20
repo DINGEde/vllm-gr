@@ -36,12 +36,16 @@ python -m benchmarks.open_one_rec.one_rec_main bench throughput \
 
 ### 2. Online, API Server Mode (Production-like)
 
-Start the server using the [online V1 guide](https://github.com/JiusiServe/vllm-gr/blob/main/examples/online_serving/beam_search/README.md#start-the-server).
-The client uses a local tokenizer from the same model snapshot as the server.
-Pass `--chat-template benchmarks/open_one_rec/qwen3_soft_switch.jinja2` to
-the server to match the offline renderer. The client sends the original
-chat turns and the task's thinking setting. A per-run setting in
-`--extra-body` takes precedence over the task default.
+Follow the [online accuracy setup](accuracy.md#2-online-api-server-mode-production-like)
+to prepare the full video catalog with `--raw-catalog`. This provides the
+catalog for the throughput client's `--n 128` workload. Use the server
+command from that section with `--config "$ONEREC_WORKDIR/vllm_gr_config.yaml"`
+and set `--served-model-name onerec` to match the throughput client below.
+Keep `--chat-template benchmarks/open_one_rec/qwen3_soft_switch.jinja2`
+to match the offline renderer. Use the same tokenizer snapshot on both
+sides. The client sends the original chat turns and the task's thinking
+setting. A per-run setting in `--extra-body` takes precedence over the
+task default.
 
 Streaming TTFT starts at the first non-empty reasoning or answer fragment.
 ITL measures the intervals between successive text fragments, including
@@ -57,7 +61,7 @@ python -m benchmarks.open_one_rec.one_rec_main bench serve \
   --backend openai-chat \
   --model onerec --tokenizer "$ONEREC_MODEL" \
   --dataset-name onerec \
-  --dataset-path ./data \
+  --dataset-path ./data/benchmark_data \
   --task-types video \
   --num-prompts 100 \
   --use-beam-search \
