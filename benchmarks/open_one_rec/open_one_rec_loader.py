@@ -566,11 +566,11 @@ class BaseLoader(ABC):
                 "prompt": formatted_prompt,
                 "ground_truth": ground_truth_str,
                 "metadata": self._make_metadata_serializable(idx, metadata_dict),
+                "chat_template_kwargs": {"enable_thinking": enable_thinking},
             }
 
             if self.custom_input_len is None:
                 result_item["chat_messages"] = messages
-                result_item["chat_template_kwargs"] = {"enable_thinking": enable_thinking}
 
             result[sample_id] = result_item
 

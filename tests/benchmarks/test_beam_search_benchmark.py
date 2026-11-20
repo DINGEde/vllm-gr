@@ -15,7 +15,7 @@ from typing import Any, overload
 
 import pytest
 
-from benchmarks.beam_search.v1_performance_gate import distribution
+from benchmarks.beam_search.measure_latency import distribution
 from benchmarks.metrics import linear_percentile_sorted
 from benchmarks.qwen import benchmark_v1 as benchmark
 from benchmarks.qwen import make_workload as workload

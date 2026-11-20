@@ -67,7 +67,7 @@ run_group() {
   echo "Running $group: tasks=$*, B=4, 1000 samples/task, beam width 128"
   local group_start=$SECONDS
   VLLM_ENABLE_V1_MULTIPROCESSING=0 \
-    python -m benchmarks.beam_search.v1_recall_gate \
+    python -m benchmarks.beam_search.measure_onerec_recall \
       --model "$model_path" \
       "${model_revision_args[@]}" \
       --dataset-path "$dataset" \
@@ -80,7 +80,7 @@ run_group() {
       --temperature 0.6 \
       --result-dir "$run_dir" 2>&1 | tee "$group_dir/run.log"
   if [[ "${V1_RECALL_DIAGNOSTICS:-0}" == 1 ]]; then
-    python -m benchmarks.beam_search.v1_recall_diagnostics \
+    python -m benchmarks.beam_search.recall_diagnostics \
       --run-log "$group_dir/run.log" --output "$group_dir/attention_diagnostics.json"
   fi
   echo "$((SECONDS - group_start))" > "$group_dir/wall_seconds.txt"
@@ -107,7 +107,7 @@ run_once() {
 summarize_runs() {
   local count="$1"
   echo "$((SECONDS - total_start))" > "$output_dir/total_wall_seconds.txt"
-  python -m benchmarks.beam_search.v1_recall_summary \
+  python -m benchmarks.beam_search.compare_recall_baseline \
     --result-dir "$output_dir" --repeats "$count"
 }
 

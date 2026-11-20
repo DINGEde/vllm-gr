@@ -9,6 +9,8 @@ import os
 import sys
 import time
 import traceback
+from codecs import BOM_UTF8
+from collections.abc import AsyncIterable, AsyncIterator
 from importlib import import_module
 from typing import Literal
 
@@ -21,7 +23,6 @@ from vllm.benchmarks.lib.endpoint_request_func import (
     ASYNC_REQUEST_FUNCS,
     RequestFuncInput,
     RequestFuncOutput,
-    StreamedResponseHandler,
     _get_chat_content,
     _update_headers_common,
     _update_payload_common,
@@ -236,6 +237,33 @@ def __init__(
 RequestFuncInput.__init__ = __init__
 
 
+async def _iter_sse_data(chunks: AsyncIterable[bytes]) -> AsyncIterator[str]:
+    buffer = b""
+    stream_start = True
+    previous_chunk_ended_in_cr = False
+    async for chunk in chunks:
+        if not chunk:
+            continue
+        # A CRLF may straddle network chunks.
+        if previous_chunk_ended_in_cr:
+            chunk = chunk.removeprefix(b"\n")
+        previous_chunk_ended_in_cr = chunk.endswith(b"\r")
+        buffer += chunk.replace(b"\r\n", b"\n").replace(b"\r", b"\n")
+
+        while b"\n\n" in buffer:
+            event, buffer = buffer.split(b"\n\n", 1)
+            if stream_start:
+                event = event.removeprefix(BOM_UTF8)
+                stream_start = False
+            data_lines = []
+            for line in event.split(b"\n"):
+                field, _, value = line.partition(b":")
+                if field == b"data":
+                    data_lines.append(value.removeprefix(b" "))
+            if payload := b"\n".join(data_lines):
+                yield payload.decode("utf-8")
+
+
 async def patched_async_request_openai_chat_completions(
     request_func_input: RequestFuncInput,
     session: aiohttp.ClientSession,
@@ -289,50 +317,51 @@ async def patched_async_request_openai_chat_completions(
 
     generated_text = ""
     last_text_timestamp: float | None = None
+    received_done = False
+    stream_error: str | None = None
     st = time.perf_counter()
     output.start_time = st
     try:
         async with session.post(url=api_url, json=payload, headers=headers) as response:
             if response.status == HTTP_OK:
-                handler = StreamedResponseHandler()
-                async for chunk_bytes in response.content.iter_any():
-                    chunk_bytes = chunk_bytes.strip()
-                    if not chunk_bytes:
+                async for chunk in _iter_sse_data(response.content.iter_any()):
+                    if chunk == "[DONE]":
+                        received_done = True
+                        break
+
+                    data = json.loads(chunk)
+                    if "error" in data:
+                        if stream_error is None:
+                            error = data["error"]
+                            error_message = (
+                                error.get("message") if isinstance(error, dict) else error
+                            )
+                            stream_error = str(error_message or chunk)
                         continue
 
-                    messages = handler.add_chunk(chunk_bytes)
-                    for message in messages:
-                        # NOTE: SSE comments (often used as pings) start with
-                        # a colon. These are not JSON data payload and should
-                        # be skipped.
-                        if message.startswith(":"):
-                            continue
+                    if choices := data.get("choices"):
+                        delta = choices[0]["delta"]
+                        text = text_from_message(delta)
+                        if text:
+                            timestamp = time.perf_counter()
+                            if last_text_timestamp is None:
+                                output.ttft = timestamp - st
+                            else:
+                                output.itl.append(timestamp - last_text_timestamp)
+                            last_text_timestamp = timestamp
+                            generated_text += text
+                    if usage := data.get("usage"):
+                        output.output_tokens = usage.get("completion_tokens", output.output_tokens)
+                        output.prompt_len = usage.get("prompt_tokens", output.prompt_len)
 
-                        chunk = message.removeprefix("data: ")
-
-                        if chunk != "[DONE]":
-                            data = json.loads(chunk)
-
-                            if choices := data.get("choices"):
-                                delta = choices[0]["delta"]
-                                text = text_from_message(delta)
-                                if text:
-                                    timestamp = time.perf_counter()
-                                    if last_text_timestamp is None:
-                                        output.ttft = timestamp - st
-                                    else:
-                                        output.itl.append(timestamp - last_text_timestamp)
-                                    last_text_timestamp = timestamp
-                                    generated_text += text
-                            if usage := data.get("usage"):
-                                output.output_tokens = usage.get(
-                                    "completion_tokens", output.output_tokens
-                                )
-                                output.prompt_len = usage.get("prompt_tokens", output.prompt_len)
-
-                output.generated_text = generated_text
-                output.success = last_text_timestamp is not None
-                if not output.success:
+                output.success = (
+                    received_done and last_text_timestamp is not None and stream_error is None
+                )
+                if stream_error is not None:
+                    output.error = stream_error
+                elif not received_done:
+                    output.error = "response ended without [DONE]"
+                elif last_text_timestamp is None:
                     output.error = "response contains no text output"
             else:
                 output.error = response.reason or ""
@@ -340,8 +369,9 @@ async def patched_async_request_openai_chat_completions(
     except Exception:
         output.success = False
         exc_info = sys.exc_info()
-        output.error = "".join(traceback.format_exception(*exc_info))
+        output.error = stream_error or "".join(traceback.format_exception(*exc_info))
 
+    output.generated_text = generated_text
     output.latency = time.perf_counter() - st
     if pbar:
         pbar.update(1)

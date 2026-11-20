@@ -8,11 +8,15 @@ import sys
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
+from unittest.mock import Mock
 
 import pytest
 import requests
 
 pytestmark = [pytest.mark.cpu_test, pytest.mark.l1]
+
+_SID_A = "<|sid_begin|><s_a_1><s_b_2><s_c_3><|sid_end|>"
+_SID_B = "<|sid_begin|><s_a_4><s_b_5><s_c_6><|sid_end|>"
 
 
 @pytest.mark.parametrize(  # type: ignore[misc]
@@ -94,8 +98,20 @@ def test_accuracy_cli_reports_failed_samples(
     assert len(list(tmp_path.glob("*.json"))) == 1
 
 
-def test_accuracy_keeps_successful_wrong_answers(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+@pytest.mark.parametrize(  # type: ignore[misc]
+    ("ground_truth", "content", "expected_pass_at_1"),
+    [
+        pytest.param(_SID_B, _SID_B, 1, id="final-answer-matches"),
+        pytest.param(_SID_A, _SID_B, 0, id="only-reasoning-matches"),
+        pytest.param(_SID_A, None, 0, id="missing-final-answer"),
+    ],
+)
+def test_accuracy_scores_final_sid(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    ground_truth: str,
+    content: str | None,
+    expected_pass_at_1: int,
 ) -> None:
     from transformers import AutoTokenizer
 
@@ -112,7 +128,7 @@ def test_accuracy_keeps_successful_wrong_answers(
             "prompt": "locally rendered prompt",
             "chat_messages": messages,
             "chat_template_kwargs": {"enable_thinking": False},
-            "ground_truth": "<|sid_begin|><s_a_1><s_b_2><s_c_3><|sid_end|>",
+            "ground_truth": ground_truth,
         }
     }
 
@@ -121,11 +137,7 @@ def test_accuracy_keeps_successful_wrong_answers(
         assert kwargs["json"]["chat_template_kwargs"] == {"enable_thinking": True}
         return SimpleNamespace(
             raise_for_status=lambda: None,
-            json=lambda: {
-                "choices": [
-                    {"message": {"content": "<|sid_begin|><s_a_4><s_b_5><s_c_6><|sid_end|>"}}
-                ]
-            },
+            json=lambda: {"choices": [{"message": {"reasoning": _SID_A, "content": content}}]},
         )
 
     reg = accuracy.TASK_REGISTRY["video"]
@@ -165,27 +177,139 @@ def test_accuracy_keeps_successful_wrong_answers(
     assert accuracy.main() == 0
     report = json.loads(next(tmp_path.glob("*.json")).read_text())
     assert report["total_samples"] == 1
-    assert report["pass@1"] == 0
+    assert report["pass@1"] == expected_pass_at_1
+
+
+def test_accuracy_keeps_truncated_inline_thinking_at_its_pid_rank(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from transformers import AutoTokenizer
+
+    import benchmarks.open_one_rec.one_rec_acc_test as accuracy
+    from benchmarks.open_one_rec.tasks.recommendation.utils_by_pid import encode_sid
+
+    samples = {
+        "video-42": {"prompt": "question", "ground_truth": _SID_A, "metadata": {"answer_pid": [42]}}
+    }
+    mapping = {encode_sid(1, 2, 3): [{"pid": 42, "count_after_downsample": 1}]}
+    (tmp_path / "sid2pid.json").write_text(json.dumps(mapping), encoding="utf-8")
+    choices = [
+        {"message": {"content": f"<think>maybe {_SID_A}"}},
+        {"message": {"content": _SID_A}},
+    ]
+    response = SimpleNamespace(raise_for_status=lambda: None, json=lambda: {"choices": choices})
+    config = accuracy.TASK_REGISTRY["video"].config["evaluation_config"]
+    monkeypatch.setitem(config, "evaluation_mode", "pid")
+    monkeypatch.setitem(config, "k_values", [1, 2])
+    monkeypatch.setattr(AutoTokenizer, "from_pretrained", lambda *a, **kw: object())
+    monkeypatch.setattr(
+        accuracy, "DataLoaderWrapper", lambda **kw: SimpleNamespace(load_data=lambda **kw: samples)
+    )
+    monkeypatch.setattr(accuracy.requests, "post", lambda *a, **kw: response)
+    results = tmp_path / "results"
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "accuracy",
+            "--task-type",
+            "video",
+            "--endpoint",
+            "/v1/chat/completions",
+            "--n",
+            "2",
+            "--dataset-path",
+            str(tmp_path),
+            "--result-dir",
+            str(results),
+        ],
+    )
+
+    assert accuracy.main() == 0
+    report = json.loads(next(results.glob("*.json")).read_text())
+    assert report["total_samples"] == 1
+    assert report["pid_pass@1"] == 0
+    assert report["pid_pass@2"] == 1
+
+
+@pytest.mark.parametrize(  # type: ignore[misc]
+    ("task", "judge_method"),
+    [("rec_reason", "_evaluate_reasoning"), ("item_understand", "_evaluate_wip")],
+)
+def test_accuracy_judges_receive_final_answers(
+    monkeypatch: pytest.MonkeyPatch, task: str, judge_method: str
+) -> None:
+    from transformers import AutoTokenizer
+
+    import benchmarks.open_one_rec.one_rec_acc_test as accuracy
+
+    messages = {
+        "both": {"reasoning": "working notes", "content": "final answer"},
+        "reasoning-only": {"reasoning_content": "working notes", "content": None},
+        "content-only": {"content": "plain answer"},
+        "inline": {"content": "<think>the object could be red</think>It is blue"},
+    }
+    samples = {key: {"prompt": key, "ground_truth": "reference"} for key in messages}
+
+    def post(_url: str, **kwargs: Any) -> Any:
+        message = messages[kwargs["json"]["messages"][0]["content"]]
+        return SimpleNamespace(
+            raise_for_status=lambda: None, json=lambda: {"choices": [{"message": message}]}
+        )
+
+    monkeypatch.setattr(AutoTokenizer, "from_pretrained", lambda *a, **kw: object())
+    monkeypatch.setattr(
+        accuracy, "DataLoaderWrapper", lambda **kw: SimpleNamespace(load_data=lambda **kw: samples)
+    )
+    monkeypatch.setattr(accuracy.requests, "post", post)
+    judge = Mock(return_value=({}, {}))
+    monkeypatch.setattr(accuracy.TASK_REGISTRY[task].evaluator_class, judge_method, judge)
+    monkeypatch.setattr(
+        sys, "argv", ["accuracy", "--task-type", task, "--endpoint", "/v1/chat/completions"]
+    )
+
+    assert accuracy.main() == 0
+    judge.assert_called_once()
+    assert judge.call_args.kwargs["predictions"] == [
+        "final answer",
+        "",
+        "plain answer",
+        "It is blue",
+    ]
 
 
 @pytest.mark.parametrize(  # type: ignore[misc]
     "message,expected",
     [
-        ({"reasoning": "a clue", "content": None}, "a clue"),
-        ({"reasoning_content": "old clue", "content": None}, "old clue"),
-        ({"reasoning": "A", "reasoning_content": "A", "content": "B"}, "AB"),
-        ({"reasoning": "new", "reasoning_content": "old", "content": " answer"}, "new answer"),
-        ({"reasoning": None, "reasoning_content": "old", "content": " answer"}, "old answer"),
-        ({"reasoning": "", "reasoning_content": "old", "content": None}, "old"),
-        ({"content": "answer"}, "answer"),
+        ({"reasoning": "a clue", "content": None}, ("a clue", "")),
+        ({"reasoning_content": "old clue", "content": None}, ("old clue", "")),
+        ({"reasoning": "A", "reasoning_content": "A", "content": "B"}, ("A", "B")),
+        (
+            {"reasoning": "new", "reasoning_content": "old", "content": " answer"},
+            ("new", " answer"),
+        ),
+        ({"reasoning": None, "reasoning_content": "old", "content": " answer"}, ("old", " answer")),
+        ({"reasoning": "", "reasoning_content": "old", "content": None}, ("old", "")),
+        ({"content": "answer"}, ("", "answer")),
+        ({"content": "\n  <think>notes</think> answer"}, ("notes", " answer")),
+        ({"content": "<think>notes"}, ("notes", "")),
+        ({"content": "Use <think>notes</think> here."}, ("", "Use <think>notes</think> here.")),
+        (
+            {
+                "reasoning": " ",
+                "reasoning_content": "separate",
+                "content": "<think>example</think>",
+            },
+            ("separate", "<think>example</think>"),
+        ),
         ({"content": None, "reasoning": None, "reasoning_content": ""}, None),
         ({"reasoning": 3, "content": "answer"}, None),
         ({"reasoning_content": [], "content": "answer"}, None),
         ({"content": {"text": "answer"}}, None),
     ],
 )
-def test_accuracy_http_selects_reasoning_field(
-    monkeypatch: pytest.MonkeyPatch, message: dict[str, Any], expected: str | None
+def test_accuracy_http_preserves_answer_and_reasoning(
+    monkeypatch: pytest.MonkeyPatch, message: dict[str, Any], expected: tuple[str, str] | None
 ) -> None:
     import benchmarks.open_one_rec.one_rec_acc_test as accuracy
 
@@ -201,7 +325,8 @@ def test_accuracy_http_selects_reasoning_field(
         outputs = accuracy.run_api_inference(
             ["prompt"], "model", "http://localhost/unused", "EMPTY", {}
         )
-        assert outputs[0].outputs[0].text == expected
+        completion = outputs[0].outputs[0]
+        assert (completion.reasoning, completion.content) == expected
 
 
 def test_accuracy_classification_requires_logprobs_before_loading(

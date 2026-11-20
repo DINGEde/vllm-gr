@@ -28,7 +28,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import subprocess
 import sys
 import types
 import unittest
@@ -37,6 +36,7 @@ from unittest import mock
 import pytest
 
 from tests.helpers.paths import REPO_ROOT
+from tests.helpers.vllm_subprocess import run_vllm_script
 
 ROOT = REPO_ROOT
 if str(ROOT) not in sys.path:
@@ -239,7 +239,6 @@ def _install_stub_vllm_benchmarks() -> dict[str, types.ModuleType]:
     for sym in (
         "RequestFuncInput",
         "RequestFuncOutput",
-        "StreamedResponseHandler",
         "_get_chat_content",
         "_update_headers_common",
         "_update_payload_common",
@@ -683,7 +682,7 @@ class TestPatchTriggerContractWithStubVllm(unittest.TestCase):
                 nonlocal current_time
                 for timestamp, message in messages:
                     current_time = timestamp
-                    yield message.encode()
+                    yield (message + "\n\n").encode()
 
         response = types.SimpleNamespace(status=200, content=Stream())
         session = mock.MagicMock()
@@ -699,14 +698,11 @@ class TestPatchTriggerContractWithStubVllm(unittest.TestCase):
             extra_body=None,
             prompt_len=3,
         )
-        handler = mock.MagicMock()
-        handler.add_chunk.side_effect = lambda chunk: [chunk.decode()]
-        output = types.SimpleNamespace(itl=[], output_tokens=0, ttft=0.0)
+        output = types.SimpleNamespace(itl=[], output_tokens=0, ttft=0.0, error="")
         with (
             mock.patch.object(patch_mod, "_validate_api_url"),
             mock.patch.object(patch_mod, "_update_payload_common"),
             mock.patch.object(patch_mod, "_update_headers_common"),
-            mock.patch.object(patch_mod, "StreamedResponseHandler", return_value=handler),
             mock.patch.object(patch_mod, "RequestFuncOutput", return_value=output),
             mock.patch.object(patch_mod.time, "perf_counter", side_effect=lambda: current_time),
         ):
@@ -1010,18 +1006,20 @@ class TestOneRecDatasetSampleContract(unittest.TestCase):
         ds = self._make_dataset(disable_shuffle=True)
         turns = [{"role": "system", "content": "s"}, {"role": "user", "content": "u"}]
         ds.data[0]["chat_messages"] = turns
-        ds.data[0]["chat_template_kwargs"] = {"enable_thinking": False}
+        for item in ds.data[:2]:
+            item["chat_template_kwargs"] = {"enable_thinking": False, "task_option": "value"}
         standard, adjusted = ds.sample(
             tokenizer=_FakeTokenizer(),
             num_requests=2,
             chat_template_kwargs={"enable_thinking": True},
         )
+        expected_overrides = {
+            "chat_template_kwargs": {"enable_thinking": True, "task_option": "value"}
+        }
         self.assertEqual(standard.chat_messages, turns)
-        self.assertEqual(
-            standard.request_overrides, {"chat_template_kwargs": {"enable_thinking": True}}
-        )
+        self.assertEqual(standard.request_overrides, expected_overrides)
         self.assertIsNone(adjusted.chat_messages)
-        self.assertIsNone(adjusted.request_overrides)
+        self.assertEqual(adjusted.request_overrides, expected_overrides)
 
     # -- 5.3: request_id_prefix is honored ----------------------------------
 
@@ -1197,20 +1195,9 @@ class TestOneRecDatasetExpectedOutputLen(unittest.TestCase):
 
 
 class TestPatchTriggerContractWithRealVllm(unittest.TestCase):
-    """Check real imports in fresh processes, without re-registering Torch types.
-
-    Purging vllm from sys.modules cannot undo Torch's opaque type registrations.
-    In a combined test run, importing it again fails before the contract runs.
-    Only an absent vllm installation is a skip; broken imports are failures.
-    """
-
     def _run_contract(self, explicit_patch: bool) -> None:
         script = """
-import importlib.util
 import sys
-
-if importlib.util.find_spec("vllm") is None:
-    raise SystemExit(77)
 
 import vllm.benchmarks.datasets as datasets_mod
 original_get_samples = datasets_mod.get_samples
@@ -1221,16 +1208,7 @@ if sys.argv[1] == "patch":
     import benchmarks.open_one_rec.one_rec_patch as patch_mod
     assert datasets_mod.get_samples is patch_mod.patched_get_samples
 """
-        result = subprocess.run(
-            [sys.executable, "-c", script, "patch" if explicit_patch else "package"],
-            cwd=ROOT,
-            capture_output=True,
-            text=True,
-            timeout=120,
-        )
-        if result.returncode == 77:
-            self.skipTest("vllm is not installed")
-        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        run_vllm_script(script, "patch" if explicit_patch else "package")
 
     def test_package_import_does_not_patch_real_vllm(self) -> None:
         self._run_contract(explicit_patch=False)

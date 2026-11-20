@@ -317,7 +317,7 @@ def test_onerec_benchmark_closes_engine_before_deleting_artifact(
 
 
 def test_benchmark_resolves_beam_api_across_rename() -> None:
-    import benchmarks.beam_search.v1_performance_gate as performance
+    import benchmarks.beam_search.measure_latency as performance
     import benchmarks.open_one_rec.one_rec_v1_benchmark as onerec
     import tools.AB_Tests.run_offline_benchmark as offline
 

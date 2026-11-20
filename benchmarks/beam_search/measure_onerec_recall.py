@@ -19,12 +19,12 @@ from contextlib import nullcontext
 from importlib.metadata import version
 from pathlib import Path
 
-from benchmarks.beam_search.v1_recall_diagnostics import (
+from benchmarks.beam_search.recall_diagnostics import (
     model_file_manifest,
     prefix_environment,
     token_digest,
 )
-from benchmarks.beam_search.v1_sid_validation import validate_sid_tokens
+from benchmarks.beam_search.sid_validation import validate_sid_tokens
 
 os.environ.setdefault("USE_TF", "0")
 logger = logging.getLogger(__name__)

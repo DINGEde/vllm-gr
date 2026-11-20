@@ -26,7 +26,7 @@ except ImportError:
 # Must be imported before any vllm.benchmarks module usage.
 import benchmarks.open_one_rec.one_rec_patch  # noqa: F401
 from benchmarks.open_one_rec.base_evaluator import EvaluationError
-from benchmarks.open_one_rec.chat import messages_for_prompt, text_from_message
+from benchmarks.open_one_rec.chat import messages_for_prompt
 from benchmarks.open_one_rec.open_one_rec_loader import TASK_REGISTRY, DataLoaderWrapper
 
 try:
@@ -85,9 +85,14 @@ def get_sampling_params(gen_config: dict[str, Any]) -> SamplingParams:
 
 
 class MockCompletionOutput:
-    def __init__(self, text: str, logprobs: Any = None) -> None:
-        self.text = text
+    def __init__(self, content: str, logprobs: Any = None, *, reasoning: str = "") -> None:
+        self.content = content
+        self.reasoning = reasoning
         self.logprobs = logprobs
+
+    @property
+    def text(self) -> str:
+        return self.reasoning + self.content
 
 
 class MockRequestOutput:
@@ -221,10 +226,20 @@ def run_api_inference(
                 ]
                 if any(part is not None and not isinstance(part, str) for part in parts):
                     return "choice contains non-text message content"
-                text = text_from_message(message)
-                if not text.strip():
+                reasoning, reasoning_content, content = parts
+                if not reasoning or not reasoning.strip():
+                    reasoning = reasoning_content or ""
+                content = content or ""
+                if not (reasoning.strip() or content.strip()):
                     return "choice has no text message"
-                outputs.append(MockCompletionOutput(text))
+                if not reasoning.strip():
+                    raw_content = content.lstrip()
+                    if raw_content.startswith("<think>"):
+                        # partition leaves an empty answer if generation stops inside the block.
+                        reasoning, _, content = raw_content.removeprefix("<think>").partition(
+                            "</think>"
+                        )
+                outputs.append(MockCompletionOutput(content, reasoning=reasoning))
             return MockRequestOutput(prompt, outputs)
         except (requests.RequestException, ValueError) as exc:
             return f"{type(exc).__name__}: {exc}"
@@ -526,11 +541,14 @@ def main() -> int:
 
     # Print a sample output
     if outputs:
+        completion = outputs[0].outputs[0]
         logger.info("\nSample Output [0]:")
         logger.info(f"Prompt: {outputs[0].prompt}")
-        logger.info(f"Generated Text: {outputs[0].outputs[0].text}")
-        if outputs[0].outputs[0].logprobs:
-            logger.info(f"Logprobs available: {outputs[0].outputs[0].logprobs}")
+        logger.info(f"Generated Text: {completion.content}")
+        if completion.reasoning:
+            logger.info(f"Reasoning: {completion.reasoning}")
+        if completion.logprobs:
+            logger.info(f"Logprobs available: {completion.logprobs}")
 
     # 5. Run Evaluation
     logger.info("\n--- Running Evaluation ---")
@@ -549,22 +567,15 @@ def main() -> int:
             )
             continue
 
-        # Get generations from the model output
-        if len(output.outputs) > 1:
-            generations = [o.text for o in output.outputs]
-        else:
-            generations = [output.outputs[0].text]
-
         samples_dict[sample_id] = {
             "prompt": original_sample["prompt"],
-            "generations": generations,
+            "generations": [completion.content for completion in output.outputs],
             "ground_truth": original_sample["ground_truth"],
             "metadata": original_sample.get("metadata", {}),
         }
 
     # Instantiate evaluator and compute metrics
-    evaluator_class = task_reg.evaluator_class
-    evaluator = evaluator_class(
+    evaluator = task_reg.evaluator_class(
         samples=samples_dict,
         task_name=args.task_type,
         task_config=task_config,

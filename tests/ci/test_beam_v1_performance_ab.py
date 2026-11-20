@@ -3,7 +3,9 @@
 
 import hashlib
 import json
+import os
 import statistics
+import subprocess
 from functools import cache
 from pathlib import Path
 from typing import cast
@@ -12,15 +14,98 @@ import numpy as np
 import pytest
 from safetensors.numpy import save
 
-from benchmarks.beam_search.v1_performance_ab import (
+from benchmarks.beam_search.compare_latency_ab import (
     artifact_workload_digest,
     combine_retry_results,
     compare,
     should_retry,
+    verify_workload,
 )
 
 BASE_SHA = "a" * 40
 PR_SHA = "b" * 40
+
+
+@pytest.mark.l1  # type: ignore[misc]
+@pytest.mark.parametrize(  # type: ignore[misc]
+    "legacy_base,change,rejected",
+    [
+        (True, None, None),
+        (False, None, None),
+        (True, "copyright", None),
+        (True, "validator", "sid_validation.py"),
+        (False, "validator", "sid_validation.py"),
+        (True, "license", "sid_validation.py"),
+        (False, "prompt", "single_one_rec_prompt.txt"),
+    ],
+)
+def test_workload_verification_across_validator_rename(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    legacy_base: bool,
+    change: str | None,
+    rejected: str | None,
+) -> None:
+    for key in tuple(os.environ):
+        if key.startswith("GIT_"):
+            monkeypatch.delenv(key)
+
+    def git(*args: str) -> str:
+        return subprocess.check_output(
+            [
+                "git",
+                "-C",
+                str(tmp_path),
+                "-c",
+                "core.hooksPath=/dev/null",
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@example.com",
+                "-c",
+                "commit.gpgsign=false",
+                *args,
+            ],
+            text=True,
+        ).strip()
+
+    validator = tmp_path / "benchmarks/beam_search/sid_validation.py"
+    base_validator = validator.with_name("v1_sid_validation.py") if legacy_base else validator
+    base_validator.parent.mkdir(parents=True)
+    content = (
+        "# SPDX-License-Identifier: Apache-2.0\n"
+        "# SPDX-FileCopyrightText: Copyright contributors to the vLLM project\n"
+        "CHECK = True\n"
+    )
+    base_validator.write_text(content, encoding="utf-8")
+    prompt = tmp_path / "tests/resources/single_one_rec_prompt.txt"
+    prompt.parent.mkdir(parents=True)
+    prompt.write_text("fixed prompt\n", encoding="utf-8")
+    git("init", "-q")
+    git("add", ".")
+    git("commit", "-qm", "base")
+    base_sha = git("rev-parse", "HEAD")
+
+    if legacy_base:
+        base_validator.rename(validator)
+    if change in {"copyright", "validator"}:
+        content = content.replace("vLLM project", "vLLM-GR project")
+    if change == "validator":
+        content = content.replace("CHECK = True", "CHECK = False")
+    if change == "license":
+        content = content.replace("Apache-2.0", "MIT")
+    if change == "prompt":
+        prompt.write_text("changed prompt\n", encoding="utf-8")
+    validator.write_text(content, encoding="utf-8")
+    git("add", "-A")
+    git("commit", "--allow-empty", "-qm", "candidate")
+    candidate_sha = git("rev-parse", "HEAD")
+
+    if rejected is None:
+        verify_workload(tmp_path, base_sha, candidate_sha)
+    else:
+        with pytest.raises(ValueError, match=f"A/B workload changed.*{rejected}"):
+            verify_workload(tmp_path, base_sha, candidate_sha)
 
 
 @cache

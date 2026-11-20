@@ -8,7 +8,7 @@ set -euo pipefail
 repo_root="${V1_PERF_REPO_ROOT:-$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)}"
 cd "$repo_root"
 # A/B can share one driver while importing each side's runtime from its own tree.
-driver="${V1_PERF_DRIVER:-$repo_root/benchmarks/beam_search/v1_performance_gate.py}"
+driver="${V1_PERF_DRIVER:-$repo_root/benchmarks/beam_search/measure_latency.py}"
 export PYTHONPATH="$repo_root${PYTHONPATH:+:$PYTHONPATH}"
 model="${VLLM_GR_TEST_MODEL:-OpenOneRec/OneRec-1.7B}"
 triples="${TRIPLES_PATH:?TRIPLES_PATH must point to the CI video triples}"

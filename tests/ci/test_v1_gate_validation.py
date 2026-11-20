@@ -7,19 +7,19 @@ from typing import Any
 
 import pytest
 
-from benchmarks.beam_search.v1_performance_gate import validate_online_response
-from benchmarks.beam_search.v1_recall_diagnostics import (
-    effective_attention,
-    model_file_manifest,
-    prefix_environment,
-    token_digest,
-)
-from benchmarks.beam_search.v1_recall_gate import (
+from benchmarks.beam_search.measure_latency import validate_online_response
+from benchmarks.beam_search.measure_onerec_recall import (
     RECALL_PREFILL_BUCKETS,
     graph_delta,
     infer_batch,
     recall_gr_config,
     recall_prefill_buckets,
+)
+from benchmarks.beam_search.recall_diagnostics import (
+    effective_attention,
+    model_file_manifest,
+    prefix_environment,
+    token_digest,
 )
 from benchmarks.open_one_rec.tools.convert_catalog import process_json
 from tests.helpers.paths import REPO_ROOT
@@ -159,7 +159,7 @@ def test_recall_gr_config_preserves_calibrated_b4_capture(tmp_path: Path) -> Non
         get_prefill_graph_capture_num_reqs,
     )
 
-    baseline_path = REPO_ROOT / "benchmarks/beam_search/v1_recall_b4_baseline.json"
+    baseline_path = REPO_ROOT / "benchmarks/beam_search/recall_baseline_batch4.json"
     profile = json.loads(baseline_path.read_text(encoding="utf-8"))["graph_profile"]
     assert ",".join(map(str, RECALL_PREFILL_BUCKETS)) == profile["prefill_bucket_grid"]
     token_budget = 22808

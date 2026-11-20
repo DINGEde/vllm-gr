@@ -121,9 +121,10 @@ jobs:
         if: steps.accelerator.outputs.run == 'true' && steps.cache-venv.outputs.cache-hit != 'true' && env.VLLM_GR_TARGET_DEVICE == 'cuda'
         run: uv pip install "$CI_VLLM_REQUIREMENT"
 
+      # The editable package version depends on Git HEAD. Refresh this package on reused runners.
       - name: Refresh editable installation
         if: steps.accelerator.outputs.run == 'true'
-        run: uv pip install -e '.[dev,grpc]'
+        run: uv pip install --reinstall-package vllm-gr -e '.[dev,grpc]'
 
       - name: Verify installed runtime identity
         if: steps.accelerator.outputs.run == 'true'
@@ -223,7 +224,7 @@ jobs:
         env:
           V1_RECALL_DATASET_PATH: ${{ github.workspace }}/OpenOneRec/benchmark_data
           V1_RECALL_OUTPUT_DIR: ${{ github.workspace }}/v1_recall_results
-          V1_RECALL_BASELINE_FILE: ${{ github.workspace }}/benchmarks/beam_search/v1_recall_b4_baseline.json
+          V1_RECALL_BASELINE_FILE: ${{ github.workspace }}/benchmarks/beam_search/recall_baseline_batch4.json
           V1_RECALL_DIAGNOSTICS: '1'
         run: bash tests/system/run_beam_v1_recall.sh
 

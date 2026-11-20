@@ -146,14 +146,25 @@ def test_onerec_adapter_adds_exactly_one_native_bench(
     ]
 
 
+@pytest.mark.parametrize(  # type: ignore[misc]
+    ("scenario", "expected_option"),
+    [
+        ("beam-performance", "--generated-steps"),
+        ("beam-performance-ab", "--base-sha"),
+        ("beam-recall", "--catalog-path"),
+    ],
+)
 def test_module_runner_works_from_package_directory(
-    monkeypatch: pytest.MonkeyPatch, capfd: pytest.CaptureFixture[str]
+    monkeypatch: pytest.MonkeyPatch,
+    capfd: pytest.CaptureFixture[str],
+    scenario: str,
+    expected_option: str,
 ) -> None:
     monkeypatch.chdir(REPO_ROOT / "vllm_gr")
     monkeypatch.delenv("PYTHONSAFEPATH", raising=False)
     monkeypatch.setenv("PYTHONPATH", ".")
-    scenarios.run_scenario("beam-performance-ab", ["--help"])
-    assert "--base-sha" in capfd.readouterr().out
+    scenarios.run_scenario(scenario, ["--help"])
+    assert expected_option in capfd.readouterr().out
 
 
 def test_gr_package_does_not_own_native_vllm_entrypoint() -> None:

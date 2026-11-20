@@ -5,7 +5,10 @@ from types import SimpleNamespace
 
 import pytest
 
-from benchmarks.beam_search.sid_output import extract_candidates, validate_candidates
+from benchmarks.beam_search.sid_candidates import (
+    extract_candidates,
+    validate_candidates,
+)
 from vllm_gr.outputs import CompactBeamSearchOutput, CompactBeamSearchSequence
 
 

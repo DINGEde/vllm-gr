@@ -2,7 +2,7 @@
 
 The GPU CI gate for `main` and manual `workflow_dispatch` runs on
 `decode_graph` use
-[v1_recall_b4_baseline.json](https://github.com/JiusiServe/vllm-gr/blob/main/benchmarks/beam_search/v1_recall_b4_baseline.json)
+[recall_baseline_batch4.json](https://github.com/JiusiServe/vllm-gr/blob/main/benchmarks/beam_search/recall_baseline_batch4.json)
 as its accepted accuracy reference. It measures OneRec-1.7B with ModelRunner V1,
 Graph execution, batch size 4, beam width 128, temperature 0.6, and 1000 fixed
 samples per task. Four tasks share the SID-to-PID engine; product uses a separate
@@ -42,14 +42,16 @@ On `main`, NPU runs retain the Video-100 benchmark instead of this GPU-only gate
 ## Local validation
 
 ```bash
-python -m pytest -q tests/ci/test_v1_recall_summary.py
+python -m pytest -q \
+  tests/benchmarks/beam_search/test_compare_recall_baseline.py \
+  tests/ci/test_v1_recall_summary.py
 SKIP=run-tests pre-commit run --all-files
 ```
 
 For an accelerator run with the fixed model snapshot and prepared data:
 
 ```bash
-V1_RECALL_BASELINE_FILE="$PWD/benchmarks/beam_search/v1_recall_b4_baseline.json" \
+V1_RECALL_BASELINE_FILE="$PWD/benchmarks/beam_search/recall_baseline_batch4.json" \
   bash tests/system/run_beam_v1_recall.sh
 ```
 

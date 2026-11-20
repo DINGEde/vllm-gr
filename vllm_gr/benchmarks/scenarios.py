@@ -39,17 +39,17 @@ SCENARIOS: dict[str, BenchScenario] = {
     "beam-performance": BenchScenario(
         "beam-performance",
         "Beam V1 performance gate (prepare/offline/online)",
-        module="benchmarks.beam_search.v1_performance_gate",
+        module="benchmarks.beam_search.measure_latency",
     ),
     "beam-performance-ab": BenchScenario(
         "beam-performance-ab",
         "Compare recorded base and PR result directories and write a report",
-        module="benchmarks.beam_search.v1_performance_ab",
+        module="benchmarks.beam_search.compare_latency_ab",
     ),
     "beam-recall": BenchScenario(
         "beam-recall",
         "Beam V1 recall gate",
-        module="benchmarks.beam_search.v1_recall_gate",
+        module="benchmarks.beam_search.measure_onerec_recall",
     ),
     "qwen-v1": BenchScenario(
         "qwen-v1",

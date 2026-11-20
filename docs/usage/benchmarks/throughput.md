@@ -43,10 +43,13 @@ the server to match the offline renderer. The client sends the original
 chat turns and the task's thinking setting. A per-run setting in
 `--extra-body` takes precedence over the task default.
 
-Streaming TTFT starts at the first non-empty reasoning or answer fragment.
-ITL measures the intervals between successive text fragments, including
-whitespace fragments. Request latency runs through the end of the response
-stream. A stream with no text output fails the request.
+Streaming TTFT measures the time from sending the request to receiving the
+first non-empty reasoning or answer fragment. ITL measures the intervals
+between successive text fragments, including whitespace fragments.
+A successful request receives text and `[DONE]` without a server error.
+EOF before `[DONE]` or a server error counts as a failure even after text
+has arrived. For a successful request, end-to-end latency ends at `[DONE]`,
+even if the server keeps the connection open.
 
 #### Terminal 2 — Run the throughput benchmark against the server
 

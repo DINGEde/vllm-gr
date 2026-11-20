@@ -74,7 +74,7 @@ def test_default_document_declares_every_public_option() -> None:
 def test_performance_gate_emits_server_config(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from benchmarks.beam_search import v1_performance_gate
+    from benchmarks.beam_search import measure_latency
     from tools import build_constraint_table
 
     digests = ("sha256:" + "a" * 64, "sha256:" + "b" * 64)
@@ -102,7 +102,7 @@ def test_performance_gate_emits_server_config(
             "--ab-prefill-grid",
         ],
     )
-    v1_performance_gate.prepare(v1_performance_gate.parse_args())
+    measure_latency.prepare(measure_latency.parse_args())
     config_path = tmp_path / "gr-config.yaml"
     config = load_gr_config(config_path)
     assert config.attention_backend is not None and config.attention_backend.value == "CUSTOM"

@@ -12,14 +12,35 @@ import math
 import os
 import statistics
 import time
+from importlib import import_module
 from importlib.util import module_from_spec, spec_from_file_location
 from pathlib import Path
+from types import ModuleType
 from typing import Any
 
-from benchmarks.beam_search.v1_sid_validation import (
-    validate_sid_text,
-    validate_sid_tokens,
-)
+
+def _load_sid_validator() -> ModuleType:
+    root = os.environ.get("V1_PERF_REPO_ROOT")
+    if root is None:
+        return import_module("benchmarks.beam_search.sid_validation")
+
+    # A/B runs this candidate driver on both checkouts. Load the selected
+    # checkout's validator directly so an inherited PYTHONPATH cannot supply
+    # the candidate's module when only the old filename exists in the base.
+    path = Path(root) / "benchmarks/beam_search/sid_validation.py"
+    if not path.exists():
+        path = path.with_name("v1_sid_validation.py")
+    spec = spec_from_file_location("_beam_sid_validation", path)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"Cannot load SID validator from {path}")
+    module = module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+_sid_validator = _load_sid_validator()
+validate_sid_text = _sid_validator.validate_sid_text
+validate_sid_tokens = _sid_validator.validate_sid_tokens
 
 # A/B executes this candidate driver against both runtimes. Resolve the
 # shared statistics beside the driver because an older base can have its own

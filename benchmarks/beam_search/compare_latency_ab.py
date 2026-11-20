@@ -10,6 +10,7 @@ import json
 import math
 import os
 import statistics
+import subprocess
 from pathlib import Path
 from typing import Any
 
@@ -37,6 +38,36 @@ SETUP_KEYS = (
 )
 RUNTIME_IDENTITY_KEYS = ("artifact_digest", "tokenizer_digest")
 CROSS_RUNTIME_SETUP_KEYS = tuple(key for key in SETUP_KEYS if key not in RUNTIME_IDENTITY_KEYS)
+
+
+def verify_workload(repo_root: Path, base_sha: str, candidate_sha: str) -> None:
+    """Check the committed SID validator and prompt before running ABBA."""
+    git = ["git", "-C", str(repo_root)]
+    validator = "benchmarks/beam_search/sid_validation.py"
+    base_validator = f"{base_sha}:{validator}"
+    if subprocess.run(
+        [*git, "cat-file", "-e", base_validator], stderr=subprocess.DEVNULL
+    ).returncode:
+        # The base checkout may predate the benchmark file rename.
+        base_validator = f"{base_sha}:benchmarks/beam_search/v1_sid_validation.py"
+    validator_diff = subprocess.run(
+        [
+            *git,
+            "diff",
+            "--quiet",
+            # Only the project copyright attribution can differ.
+            "-I",
+            r"^# SPDX-FileCopyrightText: Copyright contributors to the vLLM(-GR)? project$",
+            base_validator,
+            f"{candidate_sha}:{validator}",
+        ]
+    )
+    if validator_diff.returncode:
+        raise ValueError(f"A/B workload changed between base and PR: {validator}")
+
+    prompt = "tests/resources/single_one_rec_prompt.txt"
+    if subprocess.run([*git, "diff", "--quiet", base_sha, candidate_sha, "--", prompt]).returncode:
+        raise ValueError(f"A/B workload changed between base and PR: {prompt}")
 
 
 def read_json(path: Path) -> dict[str, Any]:
