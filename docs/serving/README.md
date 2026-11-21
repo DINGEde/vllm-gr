@@ -63,7 +63,7 @@ trusted gateway for remote TLS and access control. See [SECURITY.md](https://git
 The [smoke script](https://github.com/JiusiServe/vllm-gr/blob/main/examples/online_serving/grpc/run_smoke.py) exercises the
 serving entry point in a prepared GPU environment. Dependency versions and
 binding generation are maintained in the package configuration and
-[generation tool](https://github.com/JiusiServe/vllm-gr/blob/main/tools/generate_grpc_proto.py).
+[generation tool](https://github.com/JiusiServe/vllm-gr/blob/main/tools/codegen/generate_grpc_proto.py).
 
 ### Binary Beam results
 

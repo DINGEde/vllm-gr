@@ -30,7 +30,7 @@ class TestNPUGateRuntime(unittest.TestCase):
             trace = root / "trace"
             files = {
                 "tools/run_test.sh": (ROOT / "tools/run_test.sh").read_text(),
-                "tools/resource.sh": (
+                "tools/devices/resource.sh": (
                     f"npu_state={'true' if npu else 'false'}\n"
                     'get_gpu() { echo device >> "$GATE_TRACE"; echo 0; }\n'
                     # run_test.sh runs the visibility parser check on every path,
@@ -61,9 +61,18 @@ class TestNPUGateRuntime(unittest.TestCase):
                 "tests/development/test_resource.sh": (
                     '#!/bin/bash\necho resources >> "$GATE_TRACE"\n'
                 ),
-                "tools/install_xllm_ops.sh": '#!/bin/bash\necho operators >> "$GATE_TRACE"\n',
+                "tools/npu/install_xllm_ops.sh": '#!/bin/bash\necho operators >> "$GATE_TRACE"\n',
                 "tools/pre_commit/run_tests.sh": (
                     '#!/bin/bash\necho "pytest:$VLLM_GR_TARGET_DEVICE" >> "$GATE_TRACE"\n'
+                ),
+                "tools/packaging/run_wheel_smoke_test.sh": (
+                    "#!/bin/bash\n"
+                    'if [[ "$VLLM_GR_TARGET_DEVICE" == npu ]]; then\n'
+                    '    device="$ASCEND_RT_VISIBLE_DEVICES"\n'
+                    "else\n"
+                    '    device="$CUDA_VISIBLE_DEVICES"\n'
+                    "fi\n"
+                    'echo "wheel:$VLLM_GR_TARGET_DEVICE:$device:$*" >> "$GATE_TRACE"\n'
                 ),
                 "toolkit/opp/vendors/custom_xllm_math/bin/set_env.bash": "#!/bin/bash\n",
             }
@@ -117,6 +126,16 @@ class TestNPUGateRuntime(unittest.TestCase):
         self.assertEqual(code, 0, error)
         # The parser check runs, auto-detection does not.
         self.assertEqual(events, ["indices", "cuda-tests"])
+
+    @pytest.mark.l1  # type: ignore[misc]
+    def test_wheel_smoke_runs_after_tests_on_selected_device(self) -> None:
+        for npu, target, gate in ((True, "npu", "pytest:npu"), (False, "cuda", "cuda-tests")):
+            with self.subTest(target=target):
+                code, error, events = self.run_gate(
+                    npu=npu, extra_args=["--device-id", "3", "--wheel"]
+                )
+                self.assertEqual(code, 0, error)
+                self.assertEqual(events[-2:], [gate, f"wheel:{target}:3:--python python3"])
 
     def test_empty_device_id_is_rejected(self) -> None:
         for args in (["--device-id="], ["--device-id", ""]):

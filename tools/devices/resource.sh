@@ -5,6 +5,8 @@
 # This script is meant to be sourced.
 # It provides utilities to allocate and manage local GPU or NPU resources.
 
+_vllm_gr_device_tools_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+
 # Detect if we are in an NPU environment
 if command -v npu-smi &> /dev/null; then
     npu_state=true
@@ -13,8 +15,8 @@ else
 fi
 
 if [ "$npu_state" = true ]; then
-    # Source NPU utilities. The path is relative to this script.
-    source "./tools/resource-npu.sh"
+    # shellcheck source=tools/devices/resource-npu.sh
+    source "$_vllm_gr_device_tools_dir/resource-npu.sh"
 fi
 
 function is_available() {
@@ -200,9 +202,7 @@ function lock_gpu() {
         lock_pid=$(lock_npu "$@")
         echo "READY" > "$ready_file"
     else
-        local script_dir
-        script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-        python "$script_dir/lock_gpu.py" "$gpu_id" > "$ready_file" 2>/dev/null &
+        python "$_vllm_gr_device_tools_dir/lock_gpu.py" "$gpu_id" > "$ready_file" 2>/dev/null &
         lock_pid=$!
     fi
     # Poll until we see 'READY' or the process dies (max ~10s).

@@ -100,7 +100,7 @@ stop here and pass the triples file to
 The offline script builds a temporary table with the inference model's tokenizer.
 
 ```bash
-python tools/build_constraint_triples.py \
+python tools/constraints/build_constraint_triples.py \
   --catalog "$ONEREC_WORKDIR/catalog.json" \
   --output "$ONEREC_WORKDIR/constraint_triples.json" \
   --begin '<|sid_begin|>' --end '<|sid_end|>'
@@ -113,7 +113,7 @@ snapshot. This writes `constraint_table.safetensors` for HTTP or gRPC serving
 and saves the two digests for the server configuration in `digests.txt`.
 
 ```bash
-python tools/build_constraint_table.py \
+python tools/constraints/build_constraint_table.py \
   --triples "$ONEREC_WORKDIR/constraint_triples.json" \
   --model "$ONEREC_MODEL" \
   --output "$ONEREC_WORKDIR/constraint_table.safetensors" \

@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from tools.build_constraint_triples import process_catalog
+from tools.constraints.build_constraint_triples import process_catalog
 from vllm_gr.constraints.json_compiler import (
     compile_relations_json,
     compile_triples_json,

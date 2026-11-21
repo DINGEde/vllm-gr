@@ -19,7 +19,7 @@ All paths below are relative to the repository root.
 | HTTP, gRPC, session transport, and scheduling | `vllm_gr/entrypoints/`, `vllm_gr/v1/engine/`, `vllm_gr/v1/core/sched/` | [Beam batch contract](../features/beam-search.md#batch-execution-contract), [async scheduling](../features/beam-search.md#asynchronous-scheduling), [gRPC/NumPy](../serving/README.md#grpc-and-numpy-transport) |
 | Beam state and candidate selection | `vllm_gr/v1/beam/` | [Beam batch contract](../features/beam-search.md#batch-execution-contract), [GPU Beam state](../features/beam-search.md#worker-state-and-execution) |
 | Worker, Attention, and graph execution | `vllm_gr/v1/worker/`, `vllm_gr/v1/attention/backends/`, `vllm_gr/ops/` | [Prefill capture](../features/cuda-graphs.md#prefill-capture-configuration), [ModelRunner V2](../features/cuda-graphs.md#modelrunner-v2-multi-batch-execution), [NPU Prefill](../features/attention.md#npu-bsnd-prefill) |
-| Artifact loading and constrained Top-K | `vllm_gr/constraints/`, `tools/build_constraint_table.py` | [Artifact setup](../getting_started/quickstart.md), [multi-Trie contract](../features/constraint-tables.md#multiple-trie-roots) |
+| Artifact loading and constrained Top-K | `vllm_gr/constraints/`, `tools/constraints/build_constraint_table.py` | [Artifact setup](../getting_started/quickstart.md), [multi-Trie contract](../features/constraint-tables.md#multiple-trie-roots) |
 | Platform registration and activation | `vllm_gr/platforms/` | [Platform contract](../design/main-arch.md#platform-backend-contract) |
 | Pangu compatibility | `vllm_gr/pangu_compat.py` | [Pangu evaluation and serving](tools/pangu1b.md) |
 

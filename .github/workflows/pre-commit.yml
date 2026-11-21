@@ -589,7 +589,7 @@ jobs:
             -t video \
             -d ./OpenOneRec/benchmark_data \
             -o generated_data/video_catalog.json
-          python ./tools/build_constraint_triples.py \
+          python ./tools/constraints/build_constraint_triples.py \
             --catalog generated_data/video_catalog.json \
             --output generated_data/video_constraint_triples.json \
             --begin "<|sid_begin|>" \
@@ -621,7 +621,7 @@ jobs:
               --dataset-path OpenOneRec/benchmark_data \
               --mapping-file "$mapping.json" \
               --output-path "generated_data/recall_constraints/$mapping-catalog.json"
-            python tools/build_constraint_triples.py \
+            python tools/constraints/build_constraint_triples.py \
               --catalog "generated_data/recall_constraints/$mapping-catalog.json" \
               --output "generated_data/recall_constraints/${mapping}_triples.json" \
               --begin '<|sid_begin|>' \
@@ -791,7 +791,7 @@ jobs:
             -t video \
             -d ./OpenOneRec/benchmark_data \
             -o generated_data/video_catalog.json
-          python ./tools/build_constraint_triples.py \
+          python ./tools/constraints/build_constraint_triples.py \
             --catalog generated_data/video_catalog.json \
             --output generated_data/video_constraint_triples.json \
             --begin "<|sid_begin|>" \

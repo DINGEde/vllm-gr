@@ -23,7 +23,7 @@ else
 fi
 
 # Source the target library
-source "./tools/resource.sh"
+source "./tools/devices/resource.sh"
 
 echo "Running tests for resource.sh..."
 
@@ -35,7 +35,7 @@ if ! python3 - <<'PY'
 import importlib.util
 import os
 
-spec = importlib.util.spec_from_file_location("lock_gpu", "tools/lock_gpu.py")
+spec = importlib.util.spec_from_file_location("lock_gpu", "tools/devices/lock_gpu.py")
 module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(module)
 

@@ -190,6 +190,8 @@ def test_shared_driver_imports_each_selected_runtime(
     roots = [tmp_path / "base", tmp_path / "candidate"]
     benchmark_dir = Path(gate.__file__).parent
     validators = {}
+    triples = tmp_path / "triples.json"
+    triples.write_text("{}", encoding="utf-8")
     for root in roots:
         name = "v1_sid_validation.py" if root == roots[0] and legacy_base else "sid_validation.py"
         validator = root / "benchmarks/beam_search" / name
@@ -200,6 +202,21 @@ def test_shared_driver_imports_each_selected_runtime(
         validators[root] = validator.resolve()
         (root / "vllm_gr").mkdir(parents=True)
         (root / "vllm_gr/__init__.py").write_text(f"SOURCE = {root.name!r}\n", encoding="utf-8")
+        tools = root / "tools"
+        tools.mkdir()
+        (tools / "__init__.py").touch()
+        builder_dir = tools
+        if root == roots[1]:
+            builder_dir = tools / "constraints"
+            builder_dir.mkdir()
+            (builder_dir / "__init__.py").touch()
+        (builder_dir / "build_constraint_table.py").write_text(
+            "def build_constraint_table(**kwargs):\n    return __file__, 'tokenizer', 1\n",
+            encoding="utf-8",
+        )
+        prompt = root / "tests/resources/single_one_rec_prompt.txt"
+        prompt.parent.mkdir(parents=True)
+        prompt.write_text("prompt", encoding="utf-8")
         subprocess.run(["git", "init", "-q", str(root)], env=repo_env, check=True)
         subprocess.run(
             [
@@ -232,16 +249,18 @@ def test_shared_driver_imports_each_selected_runtime(
         "import vllm_gr\n"
         "driver = Path(__file__).with_name('measure_latency.py')\n"
         "functions = runpy.run_path(str(driver))\n"
+        "if sys.argv[1] == 'prepare':\n"
+        "    functions['prepare'](functions['parse_args']())\n"
+        "    sys.exit(0)\n"
         "percentile = functions['linear_percentile_sorted']\n"
         "validator = functions['validate_sid_text']\n"
         "output = Path(sys.argv[sys.argv.index('--output-dir') + 1])\n"
-        "name = 'setup' if sys.argv[1] == 'prepare' else 'offline'\n"
         "data = {'source': vllm_gr.SOURCE, "
         "'validator': str(Path(validator.__code__.co_filename).resolve()), "
         "'metrics': str(Path(percentile.__code__.co_filename).resolve()), "
         "'p95': functions['distribution']([10.0, 100.0])['p95_ms'], "
         "'driver': hashlib.sha256(driver.read_bytes()).hexdigest()}\n"
-        "(output / (name + '.json')).write_text(json.dumps(data))\n",
+        "(output / 'offline.json').write_text(json.dumps(data))\n",
         encoding="utf-8",
     )
     driver_digests = set()
@@ -254,7 +273,7 @@ def test_shared_driver_imports_each_selected_runtime(
             "V1_PERF_OUTPUT_DIR": str(output),
             "V1_PERF_MEASURE_ONLY": "1",
             "V1_PERF_OFFLINE_ONLY": "1",
-            "TRIPLES_PATH": str(tmp_path / "unused-triples.json"),
+            "TRIPLES_PATH": str(triples),
             # Simulate an inherited path pointing at the wrong side.
             "PYTHONPATH": str(roots[1 - roots.index(root)]),
         }
@@ -265,17 +284,32 @@ def test_shared_driver_imports_each_selected_runtime(
             capture_output=True,
             text=True,
         )
-        for name in ("setup", "offline"):
-            data = json.loads((output / f"{name}.json").read_text())
-            assert data["source"] == root.name
-            assert Path(data["validator"]) == validators[root]
-            assert Path(data["metrics"]) == candidate_metrics.resolve()
-            assert data["p95"] == 95.5
-            driver_digests.add(data["driver"])
+        setup = json.loads((output / "setup.json").read_text())
+        expected_tools = root / "tools" if root == roots[0] else root / "tools/constraints"
+        assert Path(setup["artifact_digest"]) == expected_tools / "build_constraint_table.py"
+        data = json.loads((output / "offline.json").read_text())
+        assert data["source"] == root.name
+        assert Path(data["validator"]) == validators[root]
+        assert Path(data["metrics"]) == candidate_metrics.resolve()
+        assert data["p95"] == 95.5
+        assert setup["benchmark_driver_sha256"] == data["driver"]
+        driver_digests.add(data["driver"])
     assert len(driver_digests) == 1
 
 
 pytestmark = pytest.mark.cpu_test
+
+
+@pytest.mark.l1  # type: ignore[misc]
+def test_prepare_propagates_missing_builder_dependency(monkeypatch: pytest.MonkeyPatch) -> None:
+    def missing_dependency(name: str) -> None:
+        assert name == "tools.constraints.build_constraint_table"
+        raise ModuleNotFoundError(name="safetensors")
+
+    monkeypatch.setattr(gate, "import_module", missing_dependency)
+    with pytest.raises(ModuleNotFoundError) as caught:
+        gate.prepare(argparse.Namespace())
+    assert caught.value.name == "safetensors"
 
 
 @pytest.mark.l1  # type: ignore[misc]
@@ -303,7 +337,7 @@ def test_ab_driver_prepares_equivalent_startup_settings(
 
     monkeypatch.setitem(
         sys.modules,
-        "tools.build_constraint_table",
+        "tools.constraints.build_constraint_table",
         SimpleNamespace(
             build_constraint_table=lambda **kwargs: (
                 "sha256:" + "a" * 64,

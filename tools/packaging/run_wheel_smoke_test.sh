@@ -36,7 +36,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 PYTHON="$("$PYTHON" -c 'import sys; print(sys.executable)')"
-ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+ROOT_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
 SMOKE_ROOT="$(mktemp -d)"
 INSTALL_DIR="$SMOKE_ROOT/site-packages"
 

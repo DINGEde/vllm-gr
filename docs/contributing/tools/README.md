@@ -1,8 +1,9 @@
 # Development utilities and validation
 
-Run commands from the repository root. Use the
-[development navigation](../development.md#select-regression-coverage) to locate
-coverage and [Pre-commit setup](../PRE_COMMIT.md) for hook commands and scope.
+Run commands from the repository root. Browse the
+[tool index](https://github.com/JiusiServe/vllm-gr/blob/main/tools/README.md)
+for entry points, the [development navigation](../development.md#select-regression-coverage)
+for regression coverage, and [Pre-commit setup](../PRE_COMMIT.md) for hook commands.
 
 ## Validation levels
 
@@ -18,7 +19,7 @@ targeted check does not satisfy every CI gate.
 | Kernel/integration | Selected `tests/kernels/` or `tests/integration/` files | Matching CUDA or Ascend runtime and a usable device |
 | Model/system | Selected `tests/st/` files or documented probes | Device, model snapshot, configuration/artifact, and any test data |
 | Local full test runner | `./tools/run_test.sh` | Available accelerator, installed runtime, model dependencies; platform behavior below |
-| Wheel smoke | `tools/run_wheel_smoke_test.sh` | Build tooling; validates installed wheel metadata/imports outside the checkout |
+| Wheel smoke | `tools/packaging/run_wheel_smoke_test.sh` | Build tooling; validates installed wheel metadata/imports outside the checkout |
 | Benchmark acceptance | `tests/system/` scripts and CI workflow | Fixed inputs, resolved branch/device policy, and saved results |
 
 ### Documentation and selected hooks
@@ -301,21 +302,22 @@ clean shutdown, not only returned candidates.
 
 The script performs these steps:
 
-1. Verifies that device-index parsing honors `CUDA_VISIBLE_DEVICES` /
-   `ASCEND_RT_VISIBLE_DEVICES` (pure logic, no device).
-2. Sources `tools/resource.sh` and selects a device:
+1. Sources `tools/devices/resource.sh`. On NPU, checks the vendor Python
+   environment before running the resource test suite. Then checks
+   `CUDA_VISIBLE_DEVICES` parsing without querying hardware.
+2. Selects a device:
     - `--device-id N` (comma-separated list accepted) uses those device ids
       directly and skips the resource auto-detection step, for a preallocated
       device.
     - Otherwise runs `tests/development/test_resource.sh` (allocation/locking
       probes) and calls `get_gpu` / `get_npu`. Auto-selection can wait for an idle
       device and is not an exclusive reservation for the suite.
-    - Selection respects the runtime visibility variables: when
+    - Auto-selection respects the runtime visibility variables: when
       `CUDA_VISIBLE_DEVICES` (or `ASCEND_RT_VISIBLE_DEVICES`) is set, only the
       listed indices are considered (see [Resource helper](#resource-helper)).
 3. On CUDA, runs `pre-commit run --all-files` with the selected device, including
    the `run-tests` hook.
-4. On NPU, probes/builds xllm-ops through `tools/install_xllm_ops.sh`, loads the
+4. On NPU, probes/builds xllm-ops through `tools/npu/install_xllm_ops.sh`, loads the
    custom operator environment, sets spawn-related variables, and directly runs
    `tools/pre_commit/run_tests.sh`. This branch does not run the other pre-commit
    hooks; run them separately when needed.
@@ -341,7 +343,7 @@ device within the runtime-visible set.
 ### Packaging
 
 ```bash
-VLLM_GR_TARGET_DEVICE=cpu ./tools/run_wheel_smoke_test.sh --python python3
+VLLM_GR_TARGET_DEVICE=cpu ./tools/packaging/run_wheel_smoke_test.sh --python python3
 ```
 
 Use `cuda` or `npu` for the other metadata targets. The build helper produces
@@ -360,7 +362,7 @@ To repeat the archive comparison from a clean checkout:
 ```bash
 export VLLM_GR_TARGET_DEVICE=cpu
 bash scripts/build_wheel.sh --python python3
-python3 tools/check_wheel_contents.py
+python3 tools/packaging/check_wheel_contents.py
 ```
 
 The comparison builds a second wheel from `git archive HEAD` for the same
@@ -390,7 +392,7 @@ command, and output location. Report skips and unavailable coverage explicitly.
 
 ## Resource helper
 
-Source `tools/resource.sh` from the root. It delegates to `resource-npu.sh` when
+Source `tools/devices/resource.sh` from the root. It delegates to `resource-npu.sh` when
 `npu-smi` is present. Device selection does not reserve the returned device, and
 it honors the runtime visibility variables: when `CUDA_VISIBLE_DEVICES` (or
 `ASCEND_RT_VISIBLE_DEVICES` for NPU) is set, `get_gpu`/`get_gpus` (respectively
@@ -417,7 +419,7 @@ selection defaults to 3000 MiB. Supply explicit thresholds when sharing devices
 across different environments. For example, select a CUDA device within 30 seconds:
 
 ```bash
-source ./tools/resource.sh
+source ./tools/devices/resource.sh
 device_id=$(get_gpu 18 30) || exit 1
 CUDA_VISIBLE_DEVICES="$device_id" python -m pytest -q tests/kernels/test_rec_constrained_topk_cuda.py
 ```
@@ -448,15 +450,3 @@ inputs. Its current container setup is CUDA-specific; it is not an NPU runner.
 Local emulation does not prove GitHub event, label, artifact, or hosted-runner
 behavior. Use the [CI workflow description](https://github.com/JiusiServe/vllm-gr/blob/main/CONTRIBUTING.md#pull-request-ci)
 when interpreting the result.
-
-## Export branch
-
-`tools/export_changes.sh` is a history-export utility, not a validation step.
-With no arguments it checks out/resets `export-branch` from `upstream/main` and
-applies the committed difference, excluding `trc`. With both remote branch and
-commit message arguments, it also commits and force-pushes to `origin` before
-returning to the original ref. It requires a clean tracked worktree and does
-not include uncommitted work in the exported difference.
-
-Use it only for an intended history export after reviewing the script and target
-branch. Ordinary documentation or test work does not require this utility.

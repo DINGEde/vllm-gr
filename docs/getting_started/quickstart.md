@@ -59,7 +59,7 @@ python benchmarks/open_one_rec/tools/convert_catalog.py \
   --dataset-path "$ONEREC_DATA/benchmark_data" \
   --output-path "$ONEREC_WORKDIR/video_catalog.json"
 
-python tools/build_constraint_triples.py \
+python tools/constraints/build_constraint_triples.py \
   --catalog "$ONEREC_WORKDIR/video_catalog.json" \
   --output "$ONEREC_WORKDIR/video_constraint_triples.json" \
   --begin '<|sid_begin|>' \
@@ -71,7 +71,7 @@ compiles a temporary `.safetensors` artifact from the triples document and the
 model tokenizer. To create a reusable artifact for an integration, run:
 
 ```bash
-python tools/build_constraint_table.py \
+python tools/constraints/build_constraint_table.py \
   --triples "$ONEREC_WORKDIR/video_constraint_triples.json" \
   --model "$ONEREC_MODEL" \
   --output "$ONEREC_WORKDIR/video_constraint_table.safetensors" \

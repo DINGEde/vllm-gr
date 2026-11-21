@@ -20,7 +20,7 @@ Two candidate modes (matching the constraint operators):
   real SIDs and makes every request emit the same low-numbered candidates).
   Provide ``valid_item_ids`` / ``prefix1_file`` + ``prefix2_file``, or build
   the triples document from the real catalog
-  (``tools/build_constraint_triples.py``) instead.
+  (``tools/constraints/build_constraint_triples.py``) instead.
 - **Sparse** (``prefix1_file`` + ``prefix2_file``): per-key constraints read
   from JSON, avoiding the O(N^3) blow-up for real co-occurrence data.
 
@@ -313,7 +313,7 @@ def build_constraint_tables_from_tokenizer(
                     "universe drops most real SIDs (every request would emit the "
                     "same low-numbered candidates). Provide --constraint-data "
                     "built from the real catalog via "
-                    "tools/build_constraint_triples.py, or pass "
+                    "tools/constraints/build_constraint_triples.py, or pass "
                     "valid_item_ids/prefix files covering the full universe."
                 )
             valid_a_ids = list(range(sa_count))

@@ -43,7 +43,7 @@ python -c 'import vllm_gr; print(vllm_gr.__file__)'
 - Write shared documentation in English and use characters accepted by
   `tools/pre_commit/check_english.py`; conversation language is unrestricted.
 - Generate `vllm_gr/entrypoints/grpc/generated/` from its proto sources using
-  `tools/generate_grpc_proto.py`. Do not hand-edit it or `vllm_gr/_version.py`.
+  `tools/codegen/generate_grpc_proto.py`. Do not hand-edit it or `vllm_gr/_version.py`.
 - When changing runtime patch targets, ownership, activation, or removal, update
   both `docs/design/runtime_patch_inventory.md` and `docs/design/patch_inventory.yaml`, with
   the corresponding contract coverage.

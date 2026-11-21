@@ -339,7 +339,7 @@ def main() -> int:
         choices=["trie", "constraint_table"],
         help=(
             "Constraint backend for constrained beam search. 'constraint_table' "
-            "requires --catalog-path to point at a tools/build_constraint_triples.py "
+            "requires --catalog-path to point at a tools/constraints/build_constraint_triples.py "
             "triples document."
         ),
     )

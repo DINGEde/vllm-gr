@@ -13,7 +13,7 @@ from zipfile import ZipFile
 
 from packaging.utils import parse_sdist_filename, parse_wheel_filename
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 PROTO_DIR = Path("vllm_gr/entrypoints/grpc/proto")
 
 

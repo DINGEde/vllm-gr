@@ -12,8 +12,11 @@ from unittest.mock import MagicMock
 import numpy as np
 import pytest
 
-import tools.build_constraint_table as build_constraint_table_module
-from tools.build_constraint_table import _resolve_model_revision, build_constraint_table
+import tools.constraints.build_constraint_table as build_constraint_table_module
+from tools.constraints.build_constraint_table import (
+    _resolve_model_revision,
+    build_constraint_table,
+)
 from vllm_gr.constraints.artifact import load_constraint_table_artifact
 from vllm_gr.constraints.json_compiler import compile_relations_json
 

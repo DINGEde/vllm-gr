@@ -34,7 +34,7 @@ gr:
 
   # Build a table from the repository root; replace --model with the inference model directory.
   # The example contains OneRec video SID triples; replace --triples for other applications.
-  # python tools/build_constraint_table.py \
+  # python tools/constraints/build_constraint_table.py \
   #   --model /absolute/path/to/OneRec-1.7B \
   #   --triples tools/AB_Tests/constraints/video_constraint_triples.json \
   #   --output "$PWD/video_constraint_table.safetensors"

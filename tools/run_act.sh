@@ -5,7 +5,7 @@
 set -x
 set -euo pipefail
 
-source "./tools/resource.sh"
+source "./tools/devices/resource.sh"
 idle_gpu=$(get_gpu 4)
 
 
@@ -21,20 +21,27 @@ if [ -z "$lock_pid" ]; then
     exit 1
 fi
 
-# Ensure we unlock the GPU on exit
-trap 'echo "Unlocking GPU $idle_gpu (PID: $lock_pid)..."; unlock_gpu "$lock_pid"' EXIT
+secret_file=""
+cleanup() {
+    if [[ -n "$secret_file" ]]; then
+        rm -f -- "$secret_file"
+    fi
+    echo "Unlocking GPU $idle_gpu (PID: $lock_pid)..."
+    unlock_gpu "$lock_pid"
+}
+trap cleanup EXIT
 
 cuda_dev=$idle_gpu
 echo "running on device $cuda_dev"
-if [ -z "${HF_TOKEN:-}" ]; then
-    token=()
-else
+token=()
+# Keep the token out of the trace for both the check and the file write.
+set +x
+if [[ -n "${HF_TOKEN:-}" ]]; then
     secret_file=$(mktemp)
-    echo "HF_TOKEN=$HF_TOKEN" > "$secret_file"
+    printf 'HF_TOKEN=%s\n' "$HF_TOKEN" > "$secret_file"
     token=("--secret-file" "$secret_file")
-    # Update trap to also clean up the secret file
-    trap 'rm -f "$secret_file"; echo "Unlocking GPU $idle_gpu (PID: $lock_pid)..."; unlock_gpu "$lock_pid"' EXIT
 fi
+set -x
 act "${token[@]}"  --container-options "--runtime=nvidia --gpus device=$cuda_dev -v ${HOME}/.cache/act-cache:/data/actions/cache" \
 --env NVIDIA_DRIVER_CAPABILITIES=all --artifact-server-path "${HOME}"/artifacts \
 -P self-hosted=ghcr.io/catthehacker/ubuntu:act-latest

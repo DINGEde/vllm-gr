@@ -80,7 +80,7 @@ def _get_npu_decode_execution() -> str:
             logger.info(
                 "vllm_gr_npu_decode_execution is unset and the xllm-ops library "
                 "is unavailable (%s); defaulting to the cascade decode path. "
-                "Install xllm-ops (tools/install_xllm_ops.sh) to enable the "
+                "Install xllm-ops (tools/npu/install_xllm_ops.sh) to enable the "
                 "fused xllm decode path by default.",
                 beam_ops.unavailable_reason(),
             )

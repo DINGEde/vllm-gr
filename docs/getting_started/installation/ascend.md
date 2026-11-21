@@ -135,7 +135,8 @@ python -c "import numpy, cv2; print('numpy', numpy.__version__, 'cv2', cv2.__ver
 by the checkout before running resource tests, selecting a device or loading
 custom operators. The check uses `tools/ci/resolve_runtime.py`, as the GitHub
 Actions runtime setup does. It reports the required and installed versions
-and fails when they disagree.
+and fails when they disagree. After device selection the test runner invokes
+`tools/npu/install_xllm_ops.sh` to check for xllm-ops and build it when missing.
 
 An older Jenkins job or Conda environment named `vllm-gr-0.22` or
 `xGr-install-22` does not become a 0.30 runtime after installing this

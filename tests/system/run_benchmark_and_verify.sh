@@ -86,7 +86,7 @@ p99_tpot_th="$P99_TPOT_THRESHOLD"
 # covering the CUDA constrained-top-k kernels it is meant to protect.
 #
 # The triples document follows the video_catalog.json generation flow: CI
-# pre-generates it in the "Build catalog" step (tools/build_constraint_triples.py)
+# pre-generates it in the "Build catalog" step (tools/constraints/build_constraint_triples.py)
 # and passes TRIPLES_PATH, mirroring CATALOG_PATH.  When it is absent (local
 # runs) it is derived from the catalog location and built on demand.
 constraint_device=cuda
@@ -96,7 +96,7 @@ if [[ "$device" == "npu" || "$device" == "gpu" || "$device" == "cuda" ]] \
   triples_path="${TRIPLES_PATH:-$(dirname "$CATALOG_PATH")/video_constraint_triples.json}"
   if [[ ! -f "$triples_path" ]]; then
     echo "Building Constraint Tables triples: $triples_path"
-    if ! python tools/build_constraint_triples.py \
+    if ! python tools/constraints/build_constraint_triples.py \
         --catalog "$CATALOG_PATH" \
         --output "$triples_path" \
         --begin "<|sid_begin|>" \

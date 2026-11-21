@@ -4,8 +4,8 @@
 """Generate the extended SMG bindings with package-relative imports/private pools.
 
 Usage:
-    python tools/generate_grpc_proto.py           # rewrite generated/ in place
-    python tools/generate_grpc_proto.py --check   # fail if generated/ is stale
+    python tools/codegen/generate_grpc_proto.py           # rewrite generated/ in place
+    python tools/codegen/generate_grpc_proto.py --check   # fail if generated/ is stale
 
 Requires ``grpcio-tools==1.84.0`` (declared in the ``dev`` extra). The bundled
 protoc version is part of the output, so a different grpcio-tools release can
@@ -19,7 +19,7 @@ import sys
 import tempfile
 from pathlib import Path
 
-GRPC_ROOT = Path(__file__).resolve().parents[1] / "vllm_gr/entrypoints/grpc"
+GRPC_ROOT = Path(__file__).resolve().parents[2] / "vllm_gr/entrypoints/grpc"
 GENERATED_FILES = ("common_pb2.py", "vllm_engine_pb2.py", "vllm_engine_pb2_grpc.py")
 
 
@@ -134,7 +134,7 @@ def check() -> int:
     if stale:
         print(
             f"\nStale gRPC bindings: {', '.join(stale)}.\n"
-            "Run `python tools/generate_grpc_proto.py` and commit the result.",
+            "Run `python tools/codegen/generate_grpc_proto.py` and commit the result.",
             file=sys.stderr,
         )
         return 1

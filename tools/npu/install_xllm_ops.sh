@@ -20,7 +20,7 @@ die() {
 }
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
+REPO_ROOT="$(cd -- "${SCRIPT_DIR}/../.." && pwd)"
 XLLM_OPS_REPOSITORY="${XLLM_OPS_REPOSITORY:-https://github.com/xLLM-AI/xllm-ops.git}"
 XLLM_OPS_DIR="${XLLM_OPS_DIR:-${REPO_ROOT}/third_party/xllm-ops}"
 

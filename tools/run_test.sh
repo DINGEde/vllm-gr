@@ -53,7 +53,7 @@ if [ -n "${CONDA_PREFIX:-}" ]; then
     export PATH=${CONDA_PREFIX}/bin:${PATH:-}
 fi
 
-source "./tools/resource.sh"
+source "./tools/devices/resource.sh"
 if [ "${npu_state:-}" == "true" ]; then
     export VLLM_GR_TARGET_DEVICE=npu
     # Jenkins must validate the same vendor Python that will run pytest.
@@ -129,7 +129,7 @@ if [ "${npu_state:-false}" == "true" ]; then
     echo "ASCEND_TOOLKIT_HOME=${ASCEND_TOOLKIT_HOME:-}"
     run_test_workdir="$(pwd)"
     ASCEND_RT_VISIBLE_DEVICES=$idle_gpu \
-    bash tools/install_xllm_ops.sh
+    bash tools/npu/install_xllm_ops.sh
 
     CUSTOM_XLLM_VENDORS_ROOT="${ASCEND_TOOLKIT_HOME}/opp/vendors"
     CUSTOM_XLLM_MATH_ROOT="${CUSTOM_XLLM_VENDORS_ROOT}/custom_xllm_math"
@@ -160,10 +160,10 @@ if [[ "$RUN_WHEEL" == "true" ]]; then
     if [[ "${npu_state:-false}" == "true" ]]; then
         VLLM_GR_TARGET_DEVICE=npu \
         ASCEND_RT_VISIBLE_DEVICES=$idle_gpu \
-        ./tools/run_wheel_smoke_test.sh --python python3
+        ./tools/packaging/run_wheel_smoke_test.sh --python python3
     else
         VLLM_GR_TARGET_DEVICE=cuda \
         CUDA_VISIBLE_DEVICES=$idle_gpu \
-        ./tools/run_wheel_smoke_test.sh --python python3
+        ./tools/packaging/run_wheel_smoke_test.sh --python python3
     fi
 fi

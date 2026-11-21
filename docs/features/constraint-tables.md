@@ -31,7 +31,7 @@ start at zero.
 ### Build
 
 Build each Trie's triples document with the existing
-`tools/build_constraint_triples.py`, then create a manifest:
+`tools/constraints/build_constraint_triples.py`, then create a manifest:
 
 ```json
 {
@@ -45,7 +45,7 @@ Build each Trie's triples document with the existing
 IDs must be consecutive, starting at zero; paths are relative to the manifest.
 
 ```bash
-python tools/build_constraint_table.py \
+python tools/constraints/build_constraint_table.py \
   --tries /path/to/tries.json \
   --model /path/to/model \
   --output /path/to/multi_trie.safetensors

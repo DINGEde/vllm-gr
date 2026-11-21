@@ -44,7 +44,7 @@ if not beam_ops.is_available():
     raise RuntimeError(
         "vllm_gr_npu_decode_execution='xllm' requires the xllm-ops library "
         f"({beam_ops.unavailable_reason()}); install it with "
-        "tools/install_xllm_ops.sh or select 'cascade' explicitly via "
+        "tools/npu/install_xllm_ops.sh or select 'cascade' explicitly via "
         "gr.npu_decode_execution=cascade"
     )
 

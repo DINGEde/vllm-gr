@@ -92,11 +92,19 @@ def write_json(path: Path, value: dict[str, Any]) -> None:
 def prepare(args: argparse.Namespace) -> None:
     import yaml
 
-    from tools.build_constraint_table import build_constraint_table
+    module_name = "tools.constraints.build_constraint_table"
+    try:
+        builder = import_module(module_name)
+    except ModuleNotFoundError as error:
+        if error.name not in {"tools.constraints", module_name}:
+            raise
+        # Keep this fallback until all supported CI bases have the new path and
+        # replaying checkouts from before the move is no longer supported.
+        builder = import_module("tools.build_constraint_table")
 
     artifact = args.output_dir / "constraint_table.safetensors"
     args.output_dir.mkdir(parents=True, exist_ok=True)
-    artifact_digest, tokenizer_digest, _ = build_constraint_table(
+    artifact_digest, tokenizer_digest, _ = builder.build_constraint_table(
         triples_path=str(args.triples),
         model=args.model,
         revision=args.revision,

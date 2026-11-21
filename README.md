@@ -45,7 +45,7 @@ The current implementation targets inference scenarios and does not aim for full
 
 - `vllm_gr/` — GRLLM (offline beam search), beam-search/catalog patches, NPU runtime utils, ops
 - [`examples/`](examples/README.md) — HTTP serving, catalog constraints, and offline inference
-- `tools/` — unified test runner and local development utilities
+- [`tools/`](tools/README.md) — unified test runner and local development utilities
 - `scripts/` — wheel-build and device lifecycle helpers used by CI
 - `tests/` — unit, contract, and Pangu system tests
 - `requirements/` — platform dependency lists (auto-selected by `setup.py` as `cuda` / `npu` / `cpu`)

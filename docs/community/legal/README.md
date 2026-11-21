@@ -51,7 +51,7 @@ upstream code needs no separate copy of the license text: that text is the root
 ```text
 pre-commit run check-spdx-header --all-files
 python -m unittest tests.legal.test_spdx_header
-python tools/generate_grpc_proto.py --check
+python tools/codegen/generate_grpc_proto.py --check
 ```
 
 The SPDX hook always runs over every tracked source file (Python, shell,

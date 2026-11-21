@@ -40,8 +40,8 @@ def prepare_serving_config(
 
     import yaml
 
-    from tools.build_constraint_table import build_constraint_table
-    from tools.build_constraint_triples import process_catalog
+    from tools.constraints.build_constraint_table import build_constraint_table
+    from tools.constraints.build_constraint_triples import process_catalog
 
     workdir.mkdir(parents=True, exist_ok=True)
     # A server using the previous YAML may still need its table. Publish a

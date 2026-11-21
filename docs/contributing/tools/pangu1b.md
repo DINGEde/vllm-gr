@@ -178,7 +178,7 @@ catalog = [
 (work / "prompt.txt").write_text("Return a semantic ID for this request.\n", encoding="utf-8")
 PY
 
-python tools/build_constraint_triples.py \
+python tools/constraints/build_constraint_triples.py \
     --catalog artifacts/pangu-public-sid/catalog.json \
     --output artifacts/pangu-public-sid/constraint_triples.json \
     --begin '<|sid_begin|>' \

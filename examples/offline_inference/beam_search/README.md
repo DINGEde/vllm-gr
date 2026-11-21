@@ -46,7 +46,7 @@ export ONEREC_WORKDIR="$PWD/results/onerec-example"
 mkdir -p "$ONEREC_WORKDIR"
 printf '%s' 'Recommend the next video.' > "$ONEREC_WORKDIR/prompt.txt"
 cp examples/online_serving/catalog/sample_catalog.json "$ONEREC_WORKDIR/catalog.json"
-python tools/build_constraint_triples.py \
+python tools/constraints/build_constraint_triples.py \
   --catalog "$ONEREC_WORKDIR/catalog.json" \
   --output "$ONEREC_WORKDIR/constraint_triples.json" \
   --begin '<|sid_begin|>' --end '<|sid_end|>'

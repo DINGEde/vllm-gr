@@ -75,7 +75,7 @@ def test_performance_gate_emits_server_config(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     from benchmarks.beam_search import measure_latency
-    from tools import build_constraint_table
+    from tools.constraints import build_constraint_table
 
     digests = ("sha256:" + "a" * 64, "sha256:" + "b" * 64)
     monkeypatch.setattr(

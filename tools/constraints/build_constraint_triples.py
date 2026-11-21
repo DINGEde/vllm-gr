@@ -18,7 +18,7 @@ Example catalog with begin/end sentinels::
 
 Usage::
 
-    python tools/build_constraint_triples.py \\
+    python tools/constraints/build_constraint_triples.py \\
         --catalog catalog.json \\
         --output constraint_triples.json \\
         --begin "<|sid_begin|>" --end "<|sid_end|>"
