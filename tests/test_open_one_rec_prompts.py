@@ -31,7 +31,9 @@ def _prompt_files() -> list[Path]:
 
 
 def test_every_prompt_matches_its_evaluator_call() -> None:
-    for path in _prompt_files():
+    paths = _prompt_files()
+    assert {path.stem for path in paths} == FORMAT_ARGS.keys()
+    for path in paths:
         text = load_prompt(path.stem)
         assert text.strip(), path.name
         expected = FORMAT_ARGS[path.stem]

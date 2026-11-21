@@ -31,23 +31,29 @@ before downloading it. A Git LFS checkout can be prepared with:
 ```bash
 git lfs install
 git clone https://huggingface.co/datasets/OpenOneRec/OpenOneRec-RecIF ./data
+export ONEREC_DATA="$PWD/data/benchmark_data"
+test -f "$ONEREC_DATA/video/video_test.parquet"
+test -f "$ONEREC_DATA/sid2pid.json"
 ```
 
-Set `--dataset-path` to the dataset root. Tasks use files such as
+The accuracy CLI and catalog tools default to `./data/benchmark_data`.
+The examples pass `--dataset-path "$ONEREC_DATA"` explicitly. For a custom
+dataset, set `ONEREC_DATA` to the directory that directly contains the task
+folders and catalog mappings. Tasks use files such as
 `video/video_test.parquet` and `interactive/interactive_test.parquet` beneath it.
 Parquet rows contain `messages` (chat messages as JSON or a list) and `metadata`
 (answer/context metadata as JSON or a mapping).
 
-| Task | Purpose |
-| --- | --- |
-| `rec_reason` | Recommendation explanation |
-| `item_understand` | Caption generation from a video SID |
-| `ad` | Ad engagement prediction |
-| `product` | Product recommendation |
-| `label_cond` | Conditional label prediction |
-| `video` | Video recommendation |
-| `interactive` | Interactive engagement prediction |
-| `label_pred` | Engagement classification |
+| Task | Purpose | Accuracy CLI support |
+| --- | --- | --- |
+| `rec_reason` | Recommendation explanation | Online long-text inference with a configured Judge |
+| `item_understand` | Caption generation from a video SID | Online long-text inference with a configured Judge |
+| `ad` | Ad engagement prediction | Online and offline SID recommendation scoring |
+| `product` | Product recommendation | Online and offline SID recommendation scoring |
+| `label_cond` | Conditional label prediction | Online and offline SID recommendation scoring |
+| `video` | Video recommendation | Online and offline SID recommendation scoring |
+| `interactive` | Interactive engagement prediction | Online and offline SID recommendation scoring |
+| `label_pred` | Engagement classification | Requires label logprobs. The accuracy CLI exits before inference. |
 
 Business evaluation also needs the catalog mappings required by the selected
 task. A triples file used to build a Constraint Table does not replace those

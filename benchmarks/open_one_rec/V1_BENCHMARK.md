@@ -1,13 +1,13 @@
 # OneRec offline V1 cache-miss benchmark
 
-The existing entry point supports V1 with `--beam-search`:
+Run the V1 benchmark from the repository root with `--beam-search`.
 
 ```bash
 CUDA_VISIBLE_DEVICES=0 OMP_NUM_THREADS=1 USE_TF=0 \
 VLLM_WORKER_MULTIPROC_METHOD=spawn \
 python -m benchmarks.open_one_rec.one_rec_main bench throughput \
   --model /absolute/path/to/OneRec-1.7B \
-  --dataset-name onerec --dataset-path /absolute/path/to/RecIF \
+  --dataset-name onerec --dataset-path ./data/benchmark_data \
   --task-types video --custom-input-len 1023 --num-prompts 100 \
   --n 128 --output-len 5 --beam-search --warmup-requests 10 \
   --constraint-triples /absolute/path/to/video_constraint_triples.json \

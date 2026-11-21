@@ -28,9 +28,10 @@ limit.
 
 ```bash
 export ONEREC_MODEL=/absolute/path/to/OneRec-1.7B
+export ONEREC_DATA="$PWD/data/benchmark_data"
 python -m benchmarks.open_one_rec.one_rec_acc_test \
   --model "$ONEREC_MODEL" \
-  --dataset-path ./data \
+  --dataset-path "$ONEREC_DATA" \
   --task-type video \
   --config ./vllm_gr_config.yaml \
   --n 128 \
@@ -43,18 +44,20 @@ python -m benchmarks.open_one_rec.one_rec_acc_test \
 #### Terminal 1 — Prepare the full catalog and start the server
 
 Run these commands from the repository root in Bash on CUDA. Set
-`ONEREC_MODEL` to your local model snapshot, download the dataset to
-`./data`, and apply the [CLI dispatch patch](../../cli/README.md#enable-gr-dispatch).
+`ONEREC_MODEL` to your local model snapshot, prepare the
+[dataset](README.md#get-dataset), and apply the
+[CLI dispatch patch](../../cli/README.md#enable-gr-dispatch).
 The video benchmark requires exactly 128 choices per request. Build the
 serving table from the full dataset's video SID mapping.
 
 ```bash
-export ONEREC_DATA="$PWD/data"
+export ONEREC_MODEL=/absolute/path/to/OneRec-1.7B
+export ONEREC_DATA="$PWD/data/benchmark_data"
 export ONEREC_WORKDIR="$PWD/results/onerec-accuracy"
 mkdir -p "$ONEREC_WORKDIR"
 
 python benchmarks/open_one_rec/tools/convert_catalog.py \
-  --dataset-path "$ONEREC_DATA/benchmark_data" \
+  --dataset-path "$ONEREC_DATA" \
   --output-path "$ONEREC_WORKDIR/catalog.json" &&
 python -m examples.online_serving.catalog.prepare_serving_config \
   --model "$ONEREC_MODEL" \
@@ -82,17 +85,16 @@ VLLM_USE_V2_MODEL_RUNNER="${VLLM_USE_V2_MODEL_RUNNER:-1}" vllm serve "$ONEREC_MO
 
 #### Terminal 2 — Run the accuracy benchmark against the server
 
-Once the server is ready, pass `./data/benchmark_data` to the accuracy
-client. In the downloaded checkout, this directory contains both
-`video/video_test.parquet` and `sid2pid.json`.
+Once the server is ready, run the accuracy client from the same checkout.
 
 ```bash
 export ONEREC_MODEL=/absolute/path/to/OneRec-1.7B
+export ONEREC_DATA="$PWD/data/benchmark_data"
 python -m benchmarks.open_one_rec.one_rec_acc_test \
   --endpoint /v1/chat/completions \
   --model "$ONEREC_MODEL" \
   --dataset-name onerec \
-  --dataset-path ./data/benchmark_data \
+  --dataset-path "$ONEREC_DATA" \
   --task-type video \
   --n 128 \
   --num-prompts 1000 \
@@ -137,18 +139,18 @@ the reported mean can be fractional.
 
 #### Benchmark related parameters
 
-| Argument           | Type  | Default          | Description                                                               |
-| ------------------ | ----- | ---------------- | ------------------------------------------------------------------------- |
-| `--dataset-name`   | str   | onerec           | Must be `onerec` for OneRec benchmark                                     |
-| `--dataset-path`   | str   | ./data           | Path to benchmark data directory                                          |
-| `--num-prompts`    | int   | all              | Number of prompts to sample                                               |
-| `--task-type`      | str   | -                | Task to run (ad, product, label_cond, video, interactive)                 |
-| `--result-dir`     | str   | -                | Directory to save debug evaluation files                                  |
-| `--debug`          | -     | -                | Enable debug mode for evaluators                                          |
-| `--config`         | path  | -                | Offline engine YAML. Use `--gr` for JSON overrides.                       |
-| `--batch-size`     | int   | 1                | Offline V1 batch size (1, 2 or 4)                                         |
-| `--n`              | int   | dataset-specific | Override the dataset default beam width (number of beams) for beam search |
-| `--temperature`    | float | dataset-specific | Override the dataset default temperature                                  |
+| Argument           | Type  | Default                 | Description                                                               |
+| ------------------ | ----- | ----------------------- | ------------------------------------------------------------------------- |
+| `--dataset-name`   | str   | onerec                  | Must be `onerec` for OneRec benchmark                                     |
+| `--dataset-path`   | str   | `./data/benchmark_data` | Directory containing the task folders and catalog mappings                |
+| `--num-prompts`    | int   | task-specific           | Positive number of prompts to sample                                      |
+| `--task-type`      | str   | -                       | See [task support](README.md#open-one-rec-benchmark-dataset).             |
+| `--result-dir`     | str   | -                       | Directory to save debug evaluation files                                  |
+| `--debug`          | -     | -                       | Enable debug mode for evaluators                                          |
+| `--config`         | path  | -                       | Offline engine YAML. Use `--gr` for JSON overrides.                       |
+| `--batch-size`     | int   | 1                       | Offline V1 batch size (1, 2 or 4)                                         |
+| `--n`              | int   | dataset-specific        | Override the dataset default beam width (number of beams) for beam search |
+| `--temperature`    | float | dataset-specific        | Override the dataset default temperature                                  |
 
 #### Arguments for Online benchmark
 

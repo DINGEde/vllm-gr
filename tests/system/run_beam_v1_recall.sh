@@ -7,6 +7,12 @@ set -euo pipefail
 
 repo_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$repo_root"
+baseline="${V1_RECALL_BASELINE_FILE:-}"
+if [[ -n "$baseline" && ( ! -f "$baseline" || ! -r "$baseline" ) ]]; then
+  echo "V1_RECALL_BASELINE_FILE must point to a readable regular file: $baseline" >&2
+  exit 1
+fi
+
 dataset="${V1_RECALL_DATASET_PATH:-$repo_root/OpenOneRec/benchmark_data}"
 output_dir="${V1_RECALL_OUTPUT_DIR:-$repo_root/v1_recall_results}"
 model="${VLLM_GR_TEST_MODEL:-OpenOneRec/OneRec-1.7B}"
@@ -30,7 +36,7 @@ if command -v nvidia-smi >/dev/null 2>&1; then
 fi
 
 if [[ -d "$model" ]]; then
-  if [[ -n "${V1_RECALL_BASELINE_FILE:-}" ]]; then
+  if [[ -n "$baseline" ]]; then
     echo "A calibrated Recall gate requires the pinned model snapshot" >&2
     exit 1
   fi
@@ -53,7 +59,7 @@ if [[ ! "$repeat_count" =~ ^[1-9][0-9]*$ ]]; then
   echo "V1_RECALL_REPEATS must be a positive integer" >&2
   exit 1
 fi
-if [[ -n "${V1_RECALL_BASELINE_FILE:-}" && "$repeat_count" -eq 2 ]]; then
+if [[ -n "$baseline" && "$repeat_count" -eq 2 ]]; then
   echo "A configured Recall gate requires one screening run or at least three runs" >&2
   exit 1
 fi
@@ -113,7 +119,7 @@ summarize_runs() {
 
 # The normal CI path runs once. A below-minimum task triggers two fresh
 # confirmations; all three must be below the same task's historical minimum.
-if [[ -n "${V1_RECALL_BASELINE_FILE:-}" && "$repeat_count" -eq 1 ]]; then
+if [[ -n "$baseline" && "$repeat_count" -eq 1 ]]; then
   run_once 1
   summarize_runs 1
   needs_confirmation="$(python - "$output_dir/b4_repeat_summary.json" <<'PY'

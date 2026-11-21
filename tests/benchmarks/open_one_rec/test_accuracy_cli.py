@@ -66,10 +66,12 @@ def test_accuracy_cli_reports_failed_samples(
         return response
 
     def load(**kwargs: Any) -> dict[str, dict[str, str]]:
+        assert kwargs["sample_size"] is None
         return {"video-42": {"prompt": "question", "ground_truth": "answer"}}
 
     monkeypatch.setattr(AutoTokenizer, "from_pretrained", lambda *a, **kw: object())
-    monkeypatch.setattr(accuracy, "DataLoaderWrapper", lambda **kw: SimpleNamespace(load_data=load))
+    loader = Mock(return_value=SimpleNamespace(load_data=load))
+    monkeypatch.setattr(accuracy, "DataLoaderWrapper", loader)
     monkeypatch.setattr(accuracy.requests, "post", post)
     monkeypatch.setitem(
         accuracy.TASK_REGISTRY["video"].config["evaluation_config"], "evaluation_mode", "sid"
@@ -92,6 +94,7 @@ def test_accuracy_cli_reports_failed_samples(
         ],
     )
     assert accuracy.main() == 1
+    assert loader.call_args.kwargs["data_dir"] == "./data/benchmark_data"
     report = json.loads((tmp_path / "video-failed.json").read_text())
     assert report["status"] == "failed"
     assert expected in report["sample_errors"]["video-42"]
@@ -151,11 +154,8 @@ def test_accuracy_scores_final_sid(
         SimpleNamespace(config=config, evaluator_class=reg.evaluator_class),
     )
     monkeypatch.setattr(AutoTokenizer, "from_pretrained", lambda *a, **kw: object())
-    monkeypatch.setattr(
-        accuracy,
-        "DataLoaderWrapper",
-        lambda **kw: SimpleNamespace(load_data=lambda **kw: data),
-    )
+    load = Mock(return_value=data)
+    monkeypatch.setattr(accuracy, "DataLoaderWrapper", lambda **kw: SimpleNamespace(load_data=load))
     monkeypatch.setattr(accuracy.requests, "post", post)
     monkeypatch.setattr(
         sys,
@@ -168,6 +168,8 @@ def test_accuracy_scores_final_sid(
             "/v1/chat/completions",
             "--n",
             "1",
+            "--num-prompts",
+            "1",
             "--chat-template-kwargs",
             '{"enable_thinking": true}',
             "--result-dir",
@@ -178,6 +180,7 @@ def test_accuracy_scores_final_sid(
     report = json.loads(next(tmp_path.glob("*.json")).read_text())
     assert report["total_samples"] == 1
     assert report["pass@1"] == expected_pass_at_1
+    load.assert_called_once_with(task_name="video", split="test", sample_size=1)
 
 
 def test_accuracy_keeps_truncated_inline_thinking_at_its_pid_rank(
@@ -327,6 +330,35 @@ def test_accuracy_http_preserves_answer_and_reasoning(
         )
         completion = outputs[0].outputs[0]
         assert (completion.reasoning, completion.content) == expected
+
+
+@pytest.mark.parametrize("num_prompts", ["0", "-1"])  # type: ignore[misc]
+def test_accuracy_rejects_invalid_num_prompts_before_loading(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], num_prompts: str
+) -> None:
+    from transformers import AutoTokenizer
+
+    import benchmarks.open_one_rec.one_rec_acc_test as accuracy
+
+    tokenizer = Mock()
+    model = Mock()
+    loader = Mock()
+    monkeypatch.setattr(AutoTokenizer, "from_pretrained", tokenizer)
+    monkeypatch.setattr(accuracy, "GRLLM", model)
+    monkeypatch.setattr(accuracy, "DataLoaderWrapper", loader)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["accuracy", "--task-type", "video", "--gr", "{}", "--num-prompts", num_prompts],
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        accuracy.main()
+    assert exc.value.code == 2
+    assert "--num-prompts" in capsys.readouterr().err
+    tokenizer.assert_not_called()
+    model.assert_not_called()
+    loader.assert_not_called()
 
 
 def test_accuracy_classification_requires_logprobs_before_loading(

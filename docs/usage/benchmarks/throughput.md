@@ -21,11 +21,12 @@ The offline Beam runner builds a CUDA artifact from the triples.
 
 ```bash
 export ONEREC_MODEL=/absolute/path/to/OneRec-1.7B
+export ONEREC_DATA="$PWD/data/benchmark_data"
 export ONEREC_TRIPLES=/absolute/path/to/video_constraint_triples.json
 python -m benchmarks.open_one_rec.one_rec_main bench throughput \
   --model "$ONEREC_MODEL" \
   --dataset-name onerec \
-  --dataset-path ./data \
+  --dataset-path "$ONEREC_DATA" \
   --task-types video \
   --num-prompts 100 \
   --output-json results/throughput.json \
@@ -59,12 +60,13 @@ even if the server keeps the connection open.
 
 ```bash
 export ONEREC_MODEL=/absolute/path/to/OneRec-1.7B
+export ONEREC_DATA="$PWD/data/benchmark_data"
 python -m benchmarks.open_one_rec.one_rec_main bench serve \
   --endpoint /v1/chat/completions \
   --backend openai-chat \
   --model onerec --tokenizer "$ONEREC_MODEL" \
   --dataset-name onerec \
-  --dataset-path ./data/benchmark_data \
+  --dataset-path "$ONEREC_DATA" \
   --task-types video \
   --num-prompts 100 \
   --use-beam-search \
@@ -134,12 +136,13 @@ See Intel's [power level and frequency transition explanation][intel-avx512].
 > Not a performance guarantee.
 
 For diagnosis with NumPy 2.2.6, prefix the same benchmark command with the
-setting below. Use your actual dataset directory and constraint JSON path.
+setting below. Use the model, dataset and constraint paths from the offline
+throughput setup above.
 
 ```bash
 NPY_DISABLE_CPU_FEATURES=AVX512F,AVX512CD,AVX512_KNL,AVX512_KNM,AVX512_SKX,AVX512_CLX,AVX512_CNL,AVX512_ICL \
   python -m benchmarks.open_one_rec.one_rec_main bench throughput \
-  --model "$ONEREC_MODEL" --dataset-name onerec --dataset-path ./data \
+  --model "$ONEREC_MODEL" --dataset-name onerec --dataset-path "$ONEREC_DATA" \
   --task-types video --num-prompts 100 --beam-search --n 128 \
   --output-len 5 --constraint-triples "$ONEREC_TRIPLES" \
   --output-json results/throughput-no-avx512.json

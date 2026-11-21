@@ -108,14 +108,6 @@ class BaseEval(ABC):
         if type(value) not in (int, float) or not minimum <= value <= maximum:
             raise EvaluationError(f"{self.task_name}: missing or invalid Judge metric {metric}")
 
-    def _all_samples_have_keys(self, required_keys: List[str]) -> bool:
-        """Check if all samples have required keys"""
-        for sample in self.samples.values():
-            for key in required_keys:
-                if key not in sample:
-                    return False
-        return True
-
     @property
     def required_metrics(self) -> Optional[List[str]]:
         """Define required overall metric keys"""

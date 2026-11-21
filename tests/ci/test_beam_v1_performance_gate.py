@@ -6,9 +6,11 @@ import gc
 import json
 import os
 import subprocess
+import sys
 import weakref
 from dataclasses import dataclass
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -17,7 +19,8 @@ from benchmarks.beam_search import measure_latency as gate
 from tests.helpers.paths import TESTS_DIR
 
 SID_IDS = [10, 11, 12, 13, 14]
-SID_TEXT = "<|sid_begin|><s_a_1><s_b_2><s_c_3><|sid_end|>"
+SID_PIECES = ["<|sid_begin|>", "<s_a_1>", "<s_b_2>", "<s_c_3>", "<|sid_end|>"]
+SID_TEXT = "".join(SID_PIECES)
 
 
 @pytest.mark.parametrize("compact", [False, True])  # type: ignore[misc]
@@ -75,7 +78,7 @@ def test_offline_releases_consumed_outputs_before_next_call(
         def convert_ids_to_tokens(self, tokens: list[int]) -> list[str]:
             events.append("validate")
             assert tokens == SID_IDS
-            return ["<|sid_begin|>", "<s_a_1>", "<s_b_2>", "<s_c_3>", "<|sid_end|>"]
+            return SID_PIECES
 
     class LLM:
         def __init__(self, **kwargs: Any) -> None:
@@ -167,6 +170,48 @@ def test_offline_releases_consumed_outputs_before_next_call(
             + ["validate"] * (count * args.beam_width)
         )
     ]
+
+
+@pytest.mark.l1  # type: ignore[misc]
+@pytest.mark.parametrize(  # type: ignore[misc]
+    ("tokens", "score", "error"),
+    [
+        pytest.param(SID_IDS[:-1], -1.0, "expected five SID tokens", id="truncated"),
+        pytest.param(
+            [*SID_IDS[:-1], SID_IDS[0]],
+            -1.0,
+            "incomplete or malformed SID output",
+            id="wrong-boundary",
+        ),
+        pytest.param(SID_IDS, float("nan"), "invalid score/text", id="nan-score"),
+    ],
+)
+def test_offline_rejects_invalid_candidates(
+    monkeypatch: pytest.MonkeyPatch, tokens: list[int], score: float, error: str
+) -> None:
+    import torch
+
+    monkeypatch.setattr(torch.accelerator, "synchronize", lambda: None)
+    pieces = dict(zip(SID_IDS, SID_PIECES, strict=True))
+
+    def convert_ids_to_tokens(token_ids: list[int]) -> list[str]:
+        return [pieces[token_id] for token_id in token_ids]
+
+    tokenizer = SimpleNamespace(
+        convert_ids_to_tokens=convert_ids_to_tokens,
+        decode=lambda token_ids, **_kwargs: "".join(convert_ids_to_tokens(token_ids)),
+    )
+    prompt_ids = [99]
+    output = SimpleNamespace(
+        prompt_token_ids=tuple(prompt_ids),
+        sequences=[SimpleNamespace(token_ids=tokens, cumulative_logprob=score)],
+    )
+    llm = SimpleNamespace(beam_search=lambda *_args, **_kwargs: [output])
+
+    with pytest.raises(RuntimeError, match=f"offline B=1 request=0 beam=0: {error}"):
+        gate._measure_offline_batch(
+            llm, [{"prompt_token_ids": prompt_ids}], None, tokenizer, [prompt_ids], 1, 1
+        )
 
 
 def test_offline_rejects_import_from_another_checkout(
@@ -283,9 +328,6 @@ pytestmark = pytest.mark.cpu_test
 def test_ab_driver_prepares_equivalent_startup_settings(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, legacy_config: bool
 ) -> None:
-    import sys
-    from types import SimpleNamespace
-
     from vllm_gr.config.parser import load_engine_gr_config
     from vllm_gr.entrypoints import gr
 

@@ -18,9 +18,14 @@ REQUESTS=1 WARMUP_RUNS=1 REPEAT=5 \
 benchmarks/qwen/run_beam_search_benchmark.sh
 ```
 
-The first invocation creates or reuses `.venv` and installs the current
-checkout in editable mode. Set `INSTALL_MODE=skip` to require an already
-prepared environment or `INSTALL_MODE=always` to reinstall it.
+By default, the launcher creates or reuses `.venv` and installs this
+checkout in editable mode if needed. Set `INSTALL_MODE=skip` to require an
+existing environment that imports this checkout or `INSTALL_MODE=always`
+to reinstall it.
+
+Automatic workload generation reads `vocab_size` from the local
+`MODEL/config.json`. Set `WORKLOAD_JSONL` to reuse existing input IDs
+with either a local checkpoint or a model ID.
 
 `BEAM_STEPS=3` means three generated Beam stages: the Prefill produces the
 first Beam result and two Decode stages produce the next two results.
@@ -62,7 +67,7 @@ substantial trace volume and profiler overhead.
 
 ## Constraint table
 
-Beam Search V1 currently requires an enabled canonical CUDA constraint table.
+This Qwen benchmark requires an enabled canonical CUDA constraint table.
 For a real recommendation benchmark, pass a triples document produced by the
 vllm-gr constraint tooling:
 

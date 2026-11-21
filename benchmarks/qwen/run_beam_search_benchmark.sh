@@ -16,7 +16,8 @@ Create/reuse an isolated environment and benchmark offline
 GRLLM.beam_search. This entry point depends only on the vllm-gr checkout.
 
 Required environment:
-  MODEL=/absolute/path/to/model
+  MODEL=                     local model directory with config.json for workload generation
+                             or a model ID when reusing WORKLOAD_JSONL
   TOKEN_ID_START=            inclusive input/output token bound
   TOKEN_ID_END=              exclusive input/output token bound
   # The same bounds apply when reusing WORKLOAD_JSONL.
@@ -71,7 +72,13 @@ if [[ -z "${TOKEN_ID_START}" || -z "${TOKEN_ID_END}" ]]; then
   echo "Set TOKEN_ID_START and TOKEN_ID_END for the shared input/output interval." >&2
   exit 2
 fi
-if [[ -n "${WORKLOAD_JSONL}" && ! -f "${WORKLOAD_JSONL}" ]]; then
+if [[ -z "${WORKLOAD_JSONL}" ]]; then
+  if [[ ! -f "${MODEL}/config.json" || ! -r "${MODEL}/config.json" ]]; then
+    echo "Automatic workload generation reads vocab_size from ${MODEL}/config.json." >&2
+    echo "Set MODEL to a local directory with a readable config.json or supply WORKLOAD_JSONL." >&2
+    exit 2
+  fi
+elif [[ ! -f "${WORKLOAD_JSONL}" ]]; then
   echo "Workload file not found: ${WORKLOAD_JSONL}" >&2
   exit 2
 fi
@@ -112,25 +119,10 @@ case "${INSTALL_MODE}" in
     ;;
 esac
 
-echo "[1/3] Prepare vllm-gr environment: ${VENV_DIR}"
-if [[ ! -x "${VENV_DIR}/bin/python" ]]; then
-  if ! "${BOOTSTRAP_PYTHON}" -m venv "${VENV_DIR}"; then
-    if [[ ! -x "${VENV_DIR}/bin/python" ]]; then
-      echo "Failed to create virtual environment: ${VENV_DIR}" >&2
-      exit 2
-    fi
-    echo "venv was created without pip; bootstrapping pip." >&2
-  fi
-fi
 VENV_PYTHON="${VENV_DIR}/bin/python"
-if ! "${VENV_PYTHON}" -m pip --version >/dev/null 2>&1; then
-  GET_PIP="${VENV_DIR}/get-pip.py"
-  curl -fsSL "${GET_PIP_URL:-https://bootstrap.pypa.io/get-pip.py}" -o "${GET_PIP}"
-  "${VENV_PYTHON}" "${GET_PIP}"
-fi
-
 venv_has_checkout() {
-  PYTHONPATH="" "${VENV_PYTHON}" - "${REPO_ROOT}" <<'PY' >/dev/null 2>&1
+  # Resolve the package through the virtual environment's installed paths.
+  "${VENV_PYTHON}" -I - "${REPO_ROOT}" <<'PY' >/dev/null 2>&1
 import importlib.metadata
 import importlib.util
 from pathlib import Path
@@ -148,13 +140,34 @@ importlib.metadata.version("vllm-gr")
 PY
 }
 
-if [[ "${INSTALL_MODE}" == "always" ]] || {
-  [[ "${INSTALL_MODE}" == "auto" ]] && ! venv_has_checkout
-}; then
-  VLLM_GR_TARGET_DEVICE=cuda "${VENV_PYTHON}" -m pip install -e "${REPO_ROOT}"
-elif [[ "${INSTALL_MODE}" == "skip" ]] && ! venv_has_checkout; then
-  echo "INSTALL_MODE=skip but the venv does not contain this checkout." >&2
-  exit 2
+echo "[1/3] Prepare vllm-gr environment: ${VENV_DIR}"
+if [[ "${INSTALL_MODE}" == "skip" ]]; then
+  if [[ ! -x "${VENV_PYTHON}" ]]; then
+    echo "INSTALL_MODE=skip requires an existing virtual environment: ${VENV_DIR}" >&2
+    exit 2
+  fi
+  if ! venv_has_checkout; then
+    echo "INSTALL_MODE=skip but the venv does not contain this checkout: ${VENV_DIR}" >&2
+    exit 2
+  fi
+else
+  if [[ ! -x "${VENV_PYTHON}" ]]; then
+    if ! "${BOOTSTRAP_PYTHON}" -m venv "${VENV_DIR}"; then
+      if [[ ! -x "${VENV_PYTHON}" ]]; then
+        echo "Failed to create virtual environment: ${VENV_DIR}" >&2
+        exit 2
+      fi
+      echo "venv was created without pip; bootstrapping pip." >&2
+    fi
+  fi
+  if ! "${VENV_PYTHON}" -m pip --version >/dev/null 2>&1; then
+    GET_PIP="${VENV_DIR}/get-pip.py"
+    curl -fsSL "${GET_PIP_URL:-https://bootstrap.pypa.io/get-pip.py}" -o "${GET_PIP}"
+    "${VENV_PYTHON}" "${GET_PIP}"
+  fi
+  if [[ "${INSTALL_MODE}" == "always" ]] || ! venv_has_checkout; then
+    VLLM_GR_TARGET_DEVICE=cuda "${VENV_PYTHON}" -m pip install -e "${REPO_ROOT}"
+  fi
 fi
 
 CACHE_ROOT="${CACHE_ROOT:-${REPO_ROOT}/.cache}"

@@ -15,8 +15,6 @@ from typing import Any
 import requests
 
 try:
-    from vllm import SamplingParams
-
     from vllm_gr.entrypoints.gr import GRLLM
 except ImportError:
     print("Error: vLLM is not installed. Please install it to run this benchmark.")
@@ -27,7 +25,11 @@ except ImportError:
 import benchmarks.open_one_rec.one_rec_patch  # noqa: F401
 from benchmarks.open_one_rec.base_evaluator import EvaluationError
 from benchmarks.open_one_rec.chat import messages_for_prompt
-from benchmarks.open_one_rec.open_one_rec_loader import TASK_REGISTRY, DataLoaderWrapper
+from benchmarks.open_one_rec.open_one_rec_loader import (
+    DEFAULT_DATASET_PATH,
+    TASK_REGISTRY,
+    DataLoaderWrapper,
+)
 
 try:
     from vllm_gr.sampling_params import BeamSearchParams
@@ -35,53 +37,6 @@ except ImportError:
     from vllm.sampling_params import BeamSearchParams
 
 logger = logging.getLogger(__name__)
-
-
-def get_sampling_params(gen_config: dict[str, Any]) -> SamplingParams:
-    """
-    Construct vLLM SamplingParams from the task generation configuration.
-    """
-    # Extract standard vLLM parameters
-    n = gen_config.get("num_return_sequences", 1)
-    max_tokens = gen_config.get("max_new_tokens", 5)
-    temperature = gen_config.get("temperature", 1.0)
-    top_p = gen_config.get("top_p", 1.0)
-    top_k = gen_config.get("top_k", -1)
-    frequency_penalty = gen_config.get("frequency_penalty", 0.0)
-    presence_penalty = gen_config.get("presence_penalty", 0.0)
-
-    # Handle logprobs
-    logprobs = None
-    if gen_config.get("return_logprobs", False):
-        # vLLM expects an integer for logprobs (number of top logprobs to return)
-        # The config has 'logprobs': 10000, which is quite high, we clamp it for safety in this example
-        logprobs = gen_config.get("logprobs", 1)
-
-    # Handle Beam Search
-    num_beams = gen_config.get("num_beams", 1)
-
-    # Extract custom parameters (not passed to vLLM, but read as requested)
-    num_return_thinking = gen_config.get("num_return_thinking_sequences", 0)
-    max_thinking_tokens = gen_config.get("max_new_thinking_tokens", 0)
-
-    logger.info(f"  [Config Read] num_return_sequences: {n}")
-    logger.info(f"  [Config Read] num_beams: {num_beams}")
-    logger.info(
-        f"  [Config Read] num_return_thinking_sequences: {num_return_thinking} (Custom param)"
-    )
-    logger.info(f"  [Config Read] max_new_thinking_tokens: {max_thinking_tokens} (Custom param)")
-
-    return SamplingParams(
-        n=n,
-        max_tokens=max_tokens,
-        temperature=temperature,
-        top_p=top_p,
-        top_k=top_k,
-        frequency_penalty=frequency_penalty,
-        presence_penalty=presence_penalty,
-        logprobs=logprobs,
-        stop_token_ids=None,  # Could extract stop tokens if present in config
-    )
 
 
 class MockCompletionOutput:
@@ -279,7 +234,12 @@ def main() -> int:
         "--model", type=str, default="OpenOneRec/OneRec-1.7B", help="Path to model or HF hub name"
     )
     parser.add_argument("--dataset-name", default="onerec", help="Name of the dataset to use.")
-    parser.add_argument("--dataset-path", type=str, default="./data", help="Path to data directory")
+    parser.add_argument(
+        "--dataset-path",
+        type=str,
+        default=DEFAULT_DATASET_PATH,
+        help="Directory containing the task folders and catalog mappings. Default: %(default)s.",
+    )
     parser.add_argument(
         "--task-type", type=str, required=True, choices=TASK_REGISTRY.keys(), help="Task to run"
     )
@@ -367,6 +327,8 @@ def main() -> int:
         help="Online HTTP connect/read timeout in seconds",
     )
     args = parser.parse_args()
+    if args.num_prompts is not None and args.num_prompts <= 0:
+        parser.error("--num-prompts must be positive")
     if not math.isfinite(args.request_timeout) or args.request_timeout <= 0:
         parser.error("--request-timeout must be positive and finite")
     if args.n is not None and args.n <= 0:
@@ -464,7 +426,6 @@ def main() -> int:
         }
 
     # 3. Prepare Data
-    # prompts = mock_data_loader(task_config, args.num_prompts)  # Replace with real data loading
     logger.info(f"Loading real data from {args.dataset_path}...")
     from transformers import AutoTokenizer
 
@@ -474,17 +435,15 @@ def main() -> int:
     dataset = loader.load_data(
         task_name=args.task_type,
         split=split,
-        sample_size=args.num_prompts if args.num_prompts else None,
+        sample_size=args.num_prompts,
     )
 
     prompts = []
-    references = {}
     sample_ids = []
 
     for sample_id, item in dataset.items():
         prompt = item["prompt"]
         prompts.append(prompt)
-        references[sample_id] = item["ground_truth"]
         sample_ids.append(sample_id)
 
     if not prompts:

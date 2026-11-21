@@ -553,7 +553,8 @@ def patched_validate_args(args):
 
     if not getattr(args, "dataset_path", None):
         raise ValueError(
-            "--dataset-path is required for onerec dataset. Example: --dataset-path ./data"
+            "--dataset-path is required for onerec dataset. "
+            "Example: --dataset-path ./data/benchmark_data"
         )
 
 

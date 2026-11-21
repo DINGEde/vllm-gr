@@ -6,8 +6,10 @@ from __future__ import annotations
 import gzip
 import json
 import os
+import shutil
 import subprocess
 import sys
+import venv
 from argparse import Namespace
 from pathlib import Path
 from types import SimpleNamespace
@@ -19,6 +21,7 @@ from benchmarks.beam_search.measure_latency import distribution
 from benchmarks.metrics import linear_percentile_sorted
 from benchmarks.qwen import benchmark_v1 as benchmark
 from benchmarks.qwen import make_workload as workload
+from tests.helpers.paths import REPO_ROOT
 
 
 class _Tokenizer:
@@ -470,3 +473,131 @@ def test_direct_benchmark_help_imports_shared_metrics(tmp_path: Path) -> None:
         check=True,
     )
     assert "--workload-jsonl" in completed.stdout
+
+
+def _run_qwen_shell(checkout: Path, **overrides: str) -> subprocess.CompletedProcess[str]:
+    bash = os.environ.get("TEST_BASH") or shutil.which("bash")
+    if bash is None:
+        pytest.skip("Bash is required to test the Qwen launcher")
+    env = {
+        **os.environ,
+        "MODEL": "Qwen/model-id",
+        "TOKEN_ID_START": "10",
+        "TOKEN_ID_END": "20",
+        "WORKLOAD_JSONL": "",
+        "INSTALL_MODE": "skip",
+        "BOOTSTRAP_PYTHON": "./unexpected-bootstrap",
+        "GET_PIP_URL": "file:///nonexistent-qwen-test-get-pip.py",
+        "VENV_DIR": "venv",
+        "OUT_DIR": "output",
+        "CACHE_ROOT": "cache",
+        "CONTEXT_LEN": "3",
+        "REQUESTS": "1",
+        **overrides,
+    }
+    return subprocess.run(
+        [bash, "benchmarks/qwen/run_beam_search_benchmark.sh"],
+        cwd=checkout,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=10,
+    )
+
+
+@pytest.mark.l1  # type: ignore[misc]
+def test_qwen_shell_autogeneration_requires_local_config_before_install(tmp_path: Path) -> None:
+    venv_dir = tmp_path / "missing-venv"
+    completed = _run_qwen_shell(REPO_ROOT, INSTALL_MODE="always", VENV_DIR=venv_dir.as_posix())
+    assert completed.returncode == 2, completed.stderr
+    assert "Qwen/model-id/config.json" in completed.stderr
+    assert "WORKLOAD_JSONL" in completed.stderr
+    assert "[1/3]" not in completed.stdout
+    assert not venv_dir.exists()
+
+
+@pytest.mark.l1  # type: ignore[misc]
+def test_qwen_shell_skip_requires_existing_venv(tmp_path: Path) -> None:
+    workload_file = tmp_path / "input.jsonl"
+    workload_file.touch()
+    missing_venv = tmp_path / "missing-venv"
+    completed = _run_qwen_shell(
+        REPO_ROOT, WORKLOAD_JSONL=workload_file.as_posix(), VENV_DIR=missing_venv.as_posix()
+    )
+    assert completed.returncode == 2, completed.stderr
+    assert "INSTALL_MODE=skip requires an existing virtual environment" in completed.stderr
+    assert missing_venv.as_posix() in completed.stderr
+    assert "unexpected-bootstrap" not in completed.stderr
+    assert not missing_venv.exists()
+
+
+@pytest.mark.l1  # type: ignore[misc]
+def test_qwen_shell_skip_checks_checkout_and_preserves_workload_options(tmp_path: Path) -> None:
+    checkout = tmp_path / "checkout-a"
+    other_checkout = tmp_path / "checkout-b"
+    for repo in (checkout, other_checkout):
+        (repo / "vllm_gr").mkdir(parents=True)
+        (repo / "vllm_gr/__init__.py").touch()
+    qwen_dir = checkout / "benchmarks/qwen"
+    qwen_dir.mkdir(parents=True)
+    for name in ("run_beam_search_benchmark.sh", "make_workload.py"):
+        source = REPO_ROOT / "benchmarks/qwen" / name
+        (qwen_dir / name).write_text(
+            source.read_text(encoding="utf-8"), encoding="utf-8", newline="\n"
+        )
+    (qwen_dir / "benchmark_v1.py").write_text(
+        "import json, sys\nprint(json.dumps(sys.argv[1:]))\n", encoding="utf-8"
+    )
+    workload_file = checkout / "input.jsonl"
+    workload_file.write_text('{"input_ids": [10, 11, 12]}\n', encoding="utf-8")
+
+    venv_dir = checkout / "venv"
+    venv.create(venv_dir, with_pip=False)
+    python = venv_dir / "bin/python"
+    if os.name == "nt":
+        # The launcher uses the POSIX bin/python layout even under Git Bash.
+        windows_python = venv_dir / "Scripts/python.exe"
+        python.parent.mkdir()
+        python.write_text(
+            f'#!/usr/bin/env bash\nexec "{windows_python.as_posix()}" "$@"\n',
+            encoding="utf-8",
+            newline="\n",
+        )
+        python.chmod(0o755)
+        python = windows_python
+    site_packages = Path(
+        subprocess.check_output(
+            [str(python), "-I", "-c", "import sysconfig; print(sysconfig.get_path('purelib'))"],
+            text=True,
+        ).strip()
+    )
+    for name in ("vllm", "vllm_gr"):
+        metadata = site_packages / f"{name}-0.0.0.dist-info"
+        metadata.mkdir()
+        (metadata / "METADATA").write_text(f"Name: {name}\nVersion: 0.0.0\n", encoding="utf-8")
+
+    editable = site_packages / "checkout.pth"
+    editable.write_text(str(other_checkout), encoding="utf-8")
+    completed = _run_qwen_shell(checkout, WORKLOAD_JSONL=workload_file.name)
+    assert completed.returncode == 2, completed.stderr
+    assert "the venv does not contain this checkout" in completed.stderr
+    assert not (checkout / "output").exists()
+    assert not (venv_dir / "get-pip.py").exists()
+
+    editable.write_text(str(checkout), encoding="utf-8")
+    completed = _run_qwen_shell(checkout, WORKLOAD_JSONL=workload_file.name)
+    assert completed.returncode == 0, completed.stderr
+    args = next(json.loads(line) for line in completed.stdout.splitlines() if line.startswith('["'))
+    assert args[args.index("--model") + 1] == "Qwen/model-id"
+    assert args[args.index("--workload-jsonl") + 1] == workload_file.name
+
+    model = checkout / "local-model"
+    model.mkdir()
+    (model / "config.json").write_text('{"vocab_size": 100}', encoding="utf-8")
+    completed = _run_qwen_shell(checkout, MODEL=model.name)
+    assert completed.returncode == 0, completed.stderr
+    generated = next((checkout / "output").glob("*.jsonl"))
+    row = json.loads(generated.read_text(encoding="utf-8"))
+    assert len(row["input_ids"]) == 3
+    assert all(10 <= token < 20 for token in row["input_ids"])

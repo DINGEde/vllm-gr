@@ -1,6 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM-GR project
 import json
+import os
+import shutil
+import subprocess
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -63,6 +66,54 @@ def test_recall_rejects_malformed_or_truncated_beam_after_rank_32() -> None:
         output.sequences[-1].tokens = [99, *suffix]
         with pytest.raises(RuntimeError, match="SID"):
             infer_batch(llm, Tokenizer(), [[99]], params)
+
+
+@pytest.mark.l1  # type: ignore[misc]
+@pytest.mark.parametrize(  # type: ignore[misc]
+    "kind", ["missing", "directory", "absolute", "relative", "empty", "unset"]
+)
+def test_recall_shell_checks_baseline_before_data(tmp_path: Path, kind: str) -> None:
+    bash = os.environ.get("TEST_BASH") or shutil.which("bash")
+    if bash is None:
+        pytest.skip("Bash is required to test the Recall launcher")
+
+    data = tmp_path / "missing-data"
+    output = tmp_path / "output"
+    baseline = tmp_path / "baseline.json"
+    env = {
+        **os.environ,
+        "V1_RECALL_DATASET_PATH": data.as_posix(),
+        "V1_RECALL_OUTPUT_DIR": output.as_posix(),
+    }
+    if kind == "absolute":
+        baseline.write_text("{}", encoding="utf-8")
+    elif kind == "directory":
+        baseline.mkdir()
+    if kind == "unset":
+        env.pop("V1_RECALL_BASELINE_FILE", None)
+    else:
+        env["V1_RECALL_BASELINE_FILE"] = {
+            "relative": "benchmarks/beam_search/recall_baseline_batch4.json",
+            "empty": "",
+        }.get(kind, baseline.as_posix())
+
+    completed = subprocess.run(
+        [bash, (REPO_ROOT / "tests/system/run_beam_v1_recall.sh").as_posix()],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=10,
+    )
+    assert completed.returncode == 1, completed.stderr
+    if kind in ("missing", "directory"):
+        assert "V1_RECALL_BASELINE_FILE" in completed.stderr
+        assert baseline.as_posix() in completed.stderr
+        assert "Missing OneRec accuracy input" not in completed.stderr
+    else:
+        assert f"Missing OneRec accuracy input: {data.as_posix()}/sid2pid.json" in completed.stderr
+    assert not output.exists()
 
 
 @pytest.mark.l1  # type: ignore[misc]

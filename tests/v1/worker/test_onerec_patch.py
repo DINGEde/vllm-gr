@@ -1360,7 +1360,7 @@ class TestPatchedValidateArgs(unittest.TestCase):
         args = self._args(dataset_path=None)
         with self.assertRaises(ValueError) as ctx:
             self._patch_mod.patched_validate_args(args)
-        self.assertIn("--dataset-path", str(ctx.exception))
+        self.assertIn("--dataset-path ./data/benchmark_data", str(ctx.exception))
 
     def test_onerec_empty_dataset_path_raises(self) -> None:
         args = self._args(dataset_path="")
