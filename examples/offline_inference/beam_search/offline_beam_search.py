@@ -433,43 +433,6 @@ def run_beam_search(
     return outputs
 
 
-def load_triples(path: Path) -> list[list[str]]:
-    document = json.loads(path.read_text(encoding="utf-8"))
-    rows = document.get("triples") if isinstance(document, dict) else None
-    if not isinstance(rows, list) or not rows:
-        raise ValueError(f"{path} is not a nonempty Constraint Table triples document")
-    triples = []
-    for index, row in enumerate(rows):
-        if not isinstance(row, dict) or not all(key in row for key in ("a", "b", "c")):
-            raise ValueError(f"invalid triples row {index}: {row!r}")
-        triples.append([str(row["a"]), str(row["b"]), str(row["c"])])
-    return sorted(triples)
-
-
-def build_artifact(
-    model: Path,
-    catalog: Path,
-    artifact_path: Path,
-) -> tuple[str, str]:
-    from transformers import AutoConfig, AutoTokenizer
-
-    from vllm_gr.constraints.artifact import save_constraint_table_artifact
-    from vllm_gr.constraints.artifact_compiler import ConstraintTableArtifactCompiler
-    from vllm_gr.constraints.json_compiler import compile_relations_json
-    from vllm_gr.constraints.tokenizer_digest import compute_tokenizer_digest
-
-    tokenizer = AutoTokenizer.from_pretrained(model, trust_remote_code=True)
-    model_config = AutoConfig.from_pretrained(model, trust_remote_code=True)
-    tokenizer_digest = compute_tokenizer_digest(tokenizer)
-    table = ConstraintTableArtifactCompiler(
-        tokenizer,
-        int(model_config.vocab_size),
-        tokenizer_digest=tokenizer_digest,
-    ).compile(compile_relations_json(load_triples(catalog)))
-    artifact_digest = save_constraint_table_artifact(table, artifact_path)
-    return artifact_digest, tokenizer_digest
-
-
 def make_prompt(tokenizer: Any, path: Path | None, input_len: int | None) -> list[int]:
     text = DEFAULT_PROMPT
     if path is not None:
@@ -780,7 +743,9 @@ def run(args: argparse.Namespace, artifact_path: Path | None = None) -> None:
     if args.catalog is not None:
         if artifact_path is None:
             raise ValueError("artifact_path is required with --catalog")
-        artifact_digest, tokenizer_digest = build_artifact(
+        from vllm_gr.constraints.artifact_builder import build_single_trie_artifact
+
+        artifact_digest, tokenizer_digest = build_single_trie_artifact(
             args.model.resolve(), args.catalog.resolve(), artifact_path
         )
         table_config = {

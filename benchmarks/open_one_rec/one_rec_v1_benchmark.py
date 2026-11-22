@@ -8,9 +8,10 @@ import json
 import subprocess
 import tempfile
 import time
+from importlib import import_module
 from pathlib import Path
 
-from tools.AB_Tests.run_offline_benchmark import distribution_ms
+from benchmarks.metrics import distribution_ms
 
 
 def _resolve_beam_search(llm):
@@ -26,21 +27,21 @@ def _resolve_beam_search(llm):
 
 
 def _load_build_artifact():
-    """Load ``build_artifact`` from the example module present in the checkout."""
-    from importlib import import_module
-    from importlib.util import find_spec
-
-    for module_name in (
-        "examples.offline_inference.beam_search.offline_beam_search",
-        "examples.offline_inference.beam_search.offline_beam_search_v1",
+    """Load the selected runtime's builder when using a common A/B harness."""
+    for module_name, builder_name in (
+        ("vllm_gr.constraints.artifact_builder", "build_single_trie_artifact"),
+        ("examples.offline_inference.beam_search.offline_beam_search", "build_artifact"),
+        ("examples.offline_inference.beam_search.offline_beam_search_v1", "build_artifact"),
     ):
         try:
-            spec = find_spec(module_name)
-        except ModuleNotFoundError:
-            spec = None
-        if spec is not None:
-            return import_module(module_name).build_artifact
-    raise ImportError("no offline beam-search example module provides build_artifact")
+            module = import_module(module_name)
+        except ModuleNotFoundError as error:
+            missing = error.name
+            if missing and (missing == module_name or module_name.startswith(f"{missing}.")):
+                continue
+            raise
+        return getattr(module, builder_name)
+    raise ImportError("no constraint artifact builder found in the checkout")
 
 
 def run_v1_benchmark(args, tokenizer, requests):

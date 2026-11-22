@@ -152,6 +152,7 @@ def test_onerec_adapter_adds_exactly_one_native_bench(
         ("beam-performance", "--generated-steps"),
         ("beam-performance-ab", "--base-sha"),
         ("beam-recall", "--catalog-path"),
+        ("ab-offline", "--catalog"),
     ],
 )
 def test_module_runner_works_from_package_directory(

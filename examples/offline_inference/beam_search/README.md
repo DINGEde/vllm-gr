@@ -35,6 +35,9 @@ length. The command's help lists the available options.
 python examples/offline_inference/beam_search/quickstart.py --help
 ```
 
+For paired cold/warm latency measurements with the OneRec dataset, use the
+[offline A/B benchmark](../../../tools/AB_Tests/README.md).
+
 ## Run with a Constraint Table
 
 Use the [two-SID sample catalog](../../online_serving/catalog/sample_catalog.json)

@@ -41,8 +41,8 @@ def test_decode_gate_configuration_reaches_public_loader(
     digests = ("sha256:" + "a" * 64, "sha256:" + "b" * 64)
     monkeypatch.setitem(
         sys.modules,
-        "examples.offline_inference.beam_search.offline_beam_search",
-        SimpleNamespace(build_artifact=lambda *args: digests),
+        "vllm_gr.constraints.artifact_builder",
+        SimpleNamespace(build_single_trie_artifact=lambda *args: digests),
     )
     artifact = tmp_path / "table.safetensors"
     monkeypatch.setattr(

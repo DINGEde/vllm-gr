@@ -401,9 +401,7 @@ def main():
         print("Data, prompt lengths and batch plan validated; no GPU inference started.")
         return
 
-    from examples.offline_inference.beam_search.offline_beam_search import (
-        build_artifact,
-    )
+    from vllm_gr.constraints.artifact_builder import build_single_trie_artifact
     from vllm_gr.entrypoints.gr import GRLLM
     from vllm_gr.sampling_params import BeamSearchParams
     from vllm_gr.v1.beam.batch_contracts import SUPPORTED_BEAM_BATCH_SIZES
@@ -436,7 +434,7 @@ def main():
             else artifact_location
         )
         artifact.parent.mkdir(parents=True, exist_ok=True)
-        artifact_digest, tokenizer_digest = build_artifact(
+        artifact_digest, tokenizer_digest = build_single_trie_artifact(
             args.model.resolve(), args.catalog_path.resolve(), artifact
         )
         logger.info("constraint_artifact=%s digest=%s", artifact, artifact_digest)

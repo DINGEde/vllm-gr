@@ -106,13 +106,17 @@ package = Path(vllm_gr.__file__).resolve()
 root = scenarios._REPO_ROOT
 if package != checkout / "vllm_gr" / "__init__.py" or root != checkout:
     raise SystemExit(f"Expected {checkout}, loaded package {package} and benchmark checkout {root}")
-script = (root / scenarios.SCENARIOS["ab-offline"].path).resolve(strict=True)
-if not script.is_relative_to(checkout):
-    raise SystemExit(f"Benchmark script escapes checkout {checkout}: {script}")
+entry = scenarios.SCENARIOS["ab-offline"]
+relative = Path(*entry.module.split(".")).with_suffix(".py") if entry.module else entry.path
+if relative is None:
+    raise SystemExit("No driver registered for ab-offline")
+driver = (root / relative).resolve(strict=True)
+if not driver.is_file() or not driver.is_relative_to(checkout):
+    raise SystemExit(f"Invalid benchmark driver for checkout {checkout}: {driver}")
 sha = subprocess.check_output(["git", "-C", str(root), "rev-parse", "HEAD"], text=True).strip()
 if sha != sys.argv[1]:
     raise SystemExit(f"Expected Git SHA {sys.argv[1]}, loaded {sha}")
-print(f"GR package {package}\nBenchmark script {script}\nGit SHA {sha}")
+print(f"GR package {package}\nBenchmark driver {driver}\nGit SHA {sha}")
 PY
   "$VIRTUAL_ENV/bin/vllm" bench ab-offline --gr \
     --model "$MODEL" --data-dir "$DATA_DIR" --catalog "$CATALOG" \

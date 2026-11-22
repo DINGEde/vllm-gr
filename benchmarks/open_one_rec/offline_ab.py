@@ -8,10 +8,8 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
-import math
 import os
 import random
-import statistics
 import subprocess
 import time
 from collections.abc import Iterator
@@ -20,6 +18,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any
+
+from benchmarks.metrics import distribution_ms
 
 
 def file_sha256(path: Path) -> str:
@@ -138,52 +138,6 @@ def resolve_beam_search(llm: Any) -> Any:
     return method if method is not None else llm.beam_search
 
 
-def load_build_artifact() -> Any:
-    """Load ``build_artifact`` from the example module present in the checkout."""
-    from importlib import import_module
-    from importlib.util import find_spec
-
-    for module_name in (
-        "examples.offline_inference.beam_search.offline_beam_search",
-        "examples.offline_inference.beam_search.offline_beam_search_v1",
-    ):
-        try:
-            spec = find_spec(module_name)
-        except ModuleNotFoundError:
-            spec = None
-        if spec is not None:
-            return import_module(module_name).build_artifact
-    raise ImportError("no offline beam-search example module provides build_artifact")
-
-
-def distribution_ms(values: list[float]) -> dict[str, float | str]:
-    """Summarize millisecond samples using the same percentiles as the dashboard."""
-    if not values:
-        raise ValueError("cannot summarize an empty sample")
-    ordered = sorted(float(value) for value in values)
-    if any(not math.isfinite(value) or value <= 0 for value in ordered):
-        raise ValueError("canonical latency samples must be finite and positive")
-
-    def percentile(percent: float) -> float:
-        if len(ordered) == 1:
-            return ordered[0]
-        position = (len(ordered) - 1) * percent / 100.0
-        lower = int(position)
-        upper = min(lower + 1, len(ordered) - 1)
-        weight = position - lower
-        return ordered[lower] * (1.0 - weight) + ordered[upper] * weight
-
-    return {
-        "mean": statistics.fmean(ordered),
-        "std": statistics.pstdev(ordered),
-        "p50": percentile(50),
-        "p90": percentile(90),
-        "p95": percentile(95),
-        "p99": percentile(99),
-        "unit": "ms",
-    }
-
-
 def prefix_cache_counters(llm: Any) -> tuple[int, int] | None:
     """Read queried and reused token totals for the single offline engine."""
     queries = "vllm:prefix_cache_queries"
@@ -254,15 +208,15 @@ def create_v1_llm(
     args: argparse.Namespace, max_tokens: int, artifact_digests: dict[str, str] | None = None
 ) -> Iterator[Any]:
     """Keep the canonical artifact alive until all workers have shut down."""
+    from vllm_gr.constraints.artifact_builder import build_single_trie_artifact
     from vllm_gr.entrypoints.gr import GRLLM
 
-    build_artifact = load_build_artifact()
     steps = max_tokens - 2
     if steps not in (1, 2, 3):
         raise ValueError("Beam V1 requires 3/4/5 public output tokens including SID boundaries")
     with TemporaryDirectory(prefix="gr-ab-v1-") as directory:
         artifact = Path(directory) / "constraints.safetensors"
-        digest, tokenizer_digest = build_artifact(
+        digest, tokenizer_digest = build_single_trie_artifact(
             Path(args.model), args.catalog.resolve(), artifact
         )
         if artifact_digests is not None:

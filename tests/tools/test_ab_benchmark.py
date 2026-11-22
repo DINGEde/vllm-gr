@@ -10,7 +10,9 @@ from typing import Any
 
 import pytest
 
-from tools.AB_Tests import compare_ab, generate_summary, run_offline_benchmark
+from benchmarks.metrics import distribution_ms
+from benchmarks.open_one_rec import offline_ab
+from tools.AB_Tests import compare_ab, generate_summary
 
 pytestmark = [pytest.mark.cpu_test, pytest.mark.l1]
 
@@ -23,12 +25,26 @@ def test_incomplete_beam_response_is_rejected(sequences: list[list[int]]) -> Non
         ]
     )
     with pytest.raises(ValueError, match="beam|token"):
-        run_offline_benchmark.measure_e2e(llm, [1], SimpleNamespace(beam_width=2, max_tokens=2))
+        offline_ab.measure_e2e(llm, [1], SimpleNamespace(beam_width=2, max_tokens=2))
 
 
 def test_historical_percentile_algorithms() -> None:
-    assert run_offline_benchmark.distribution_ms([1.0, 3.0])["p50"] == 2.0
+    assert distribution_ms([3.0, 1.0]) == {
+        "mean": 2.0,
+        "std": 1.0,
+        "p50": 2.0,
+        "p90": pytest.approx(2.8),
+        "p95": pytest.approx(2.9),
+        "p99": pytest.approx(2.98),
+        "unit": "ms",
+    }
     assert generate_summary.distribution_ms([1.0, 3.0])["p50"] == 1.0
+
+
+@pytest.mark.parametrize("sample", [0.0, -1.0, float("inf"), float("nan")])  # type: ignore[misc]
+def test_distribution_requires_finite_positive_latencies(sample: float) -> None:
+    with pytest.raises(ValueError, match="finite and positive"):
+        distribution_ms([1.0, sample])
 
 
 @pytest.mark.parametrize(  # type: ignore[misc]
@@ -62,17 +78,17 @@ def test_cache_reuse_is_observed_outside_timer(
         sequence = SimpleNamespace(text="sid", tokens=[1] * (prompt_length + 3))
         return [SimpleNamespace(sequences=[sequence])]
 
-    monkeypatch.setattr(run_offline_benchmark.time, "perf_counter_ns", clock)
+    monkeypatch.setattr(offline_ab.time, "perf_counter_ns", clock)
     llm = SimpleNamespace(get_metrics=metrics, beam_search=beam_search)
     params = SimpleNamespace(beam_width=1, max_tokens=3, begin_token="<|sid_begin|>")
-    measured = run_offline_benchmark.measure_e2e(llm, [1] * prompt_length, params)
+    measured = offline_ab.measure_e2e(llm, [1] * prompt_length, params)
     assert measured["cached_tokens"] == expected
     assert measured["e2e_ms"] > 0
     assert events == ["metrics", "clock", "beam", "clock", "metrics"]
 
 
 def test_unavailable_prefix_cache_counters_are_unknown() -> None:
-    driver = run_offline_benchmark
+    driver = offline_ab
     assert driver.prefix_cache_counters(SimpleNamespace()) is None
     hit = SimpleNamespace(name="vllm:prefix_cache_hits", value=16)
     query = SimpleNamespace(name="vllm:prefix_cache_queries", value=32)
@@ -82,7 +98,7 @@ def test_unavailable_prefix_cache_counters_are_unknown() -> None:
 
 
 def test_workload_digest_uses_actual_ordered_tokens() -> None:
-    driver = run_offline_benchmark
+    driver = offline_ab
     ids = ["video_4", "video_2"]
     selection = driver.selection_digests(ids, [[4, 5], [2, 3]])
     changed = driver.selection_digests(ids, [[4, 5], [2, 9]])
@@ -121,12 +137,12 @@ def test_cold_and_legacy_cached_parquet_use_same_source_rows(tmp_path: Path) -> 
     original.to_parquet(path)
     cache = path.with_name("video_test_sample_3.parquet")
     tokenizer = Tokenizer()
-    cold = run_offline_benchmark.sample_prompts(path, "video", tokenizer, 4, 3)
+    cold = offline_ab.sample_prompts(path, "video", tokenizer, 4, 3)
     wrote_cache = cache.exists()
     selected = original.sample(n=3, random_state=42)
     selected.to_parquet(cache, index=False)  # Historical cache discards the source row IDs.
     cached_bytes = cache.read_bytes()
-    hot = run_offline_benchmark.sample_prompts(path, "video", tokenizer, 4, 3)
+    hot = offline_ab.sample_prompts(path, "video", tokenizer, 4, 3)
     assert cold == hot
     expected_ids = selected.index.tolist()
     random.Random(0).shuffle(expected_ids)
@@ -138,29 +154,61 @@ def test_cold_and_legacy_cached_parquet_use_same_source_rows(tmp_path: Path) -> 
 def test_local_model_identity_tracks_weights(tmp_path: Path) -> None:
     weights = tmp_path / "weights.safetensors"
     weights.write_bytes(b"original")
-    model, identity = run_offline_benchmark.resolve_model(str(tmp_path), None)
+    model, identity = offline_ab.resolve_model(str(tmp_path), None)
     assert model == tmp_path
-    assert run_offline_benchmark.resolve_model(str(tmp_path), identity) == (model, identity)
+    assert offline_ab.resolve_model(str(tmp_path), identity) == (model, identity)
     weights.write_bytes(b"changed")
     with pytest.raises(ValueError, match="does not match"):
-        run_offline_benchmark.resolve_model(str(tmp_path), identity)
+        offline_ab.resolve_model(str(tmp_path), identity)
 
 
-@pytest.mark.parametrize("catalog", [[], ["--catalog", "catalog-does-not-exist.json"]])  # type: ignore[misc]
-def test_catalog_is_required_and_readable(
-    tmp_path: Path,
+def _offline_cli_error(
+    options: list[str],
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
-    catalog: list[str],
-) -> None:
+) -> str:
     monkeypatch.setattr(
         sys,
         "argv",
-        ["offline", "--output", "raw.json", "--data-dir", str(tmp_path), *catalog],
+        [
+            "offline",
+            "--output",
+            "raw.json",
+            "--beam-width",
+            "128",
+            "--input-length",
+            "1024",
+            *options,
+        ],
     )
     with pytest.raises(SystemExit) as exc:
-        run_offline_benchmark.main()
-    assert exc.value.code == 2 and "--catalog" in capsys.readouterr().err
+        offline_ab.main()
+    assert exc.value.code == 2
+    stderr: str = capsys.readouterr().err
+    return stderr.splitlines()[-1].partition(": error: ")[2]
+
+
+def test_catalog_is_required(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    error = _offline_cli_error(["--data-dir", str(tmp_path)], monkeypatch, capsys)
+    assert error == "the following arguments are required: --catalog"
+
+
+@pytest.mark.parametrize("as_directory", [False, True], ids=["nonexistent", "directory"])  # type: ignore[misc]
+def test_catalog_must_be_a_regular_file(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    as_directory: bool,
+) -> None:
+    catalog = tmp_path / "triples.json"
+    if as_directory:
+        catalog.mkdir()
+    error = _offline_cli_error(
+        ["--data-dir", str(tmp_path), "--catalog", str(catalog)], monkeypatch, capsys
+    )
+    assert error == f"--catalog is not a regular file: {catalog}"
 
 
 def test_data_dir_is_required(
@@ -168,10 +216,8 @@ def test_data_dir_is_required(
 ) -> None:
     catalog = tmp_path / "triples.json"
     catalog.write_text("{}", encoding="utf-8")
-    monkeypatch.setattr(sys, "argv", ["offline", "--output", "raw.json", "--catalog", str(catalog)])
-    with pytest.raises(SystemExit) as exc:
-        run_offline_benchmark.main()
-    assert exc.value.code == 2 and "--data-dir" in capsys.readouterr().err
+    error = _offline_cli_error(["--catalog", str(catalog)], monkeypatch, capsys)
+    assert error == "the following arguments are required: --data-dir"
 
 
 def test_old_batched_raw_remains_readable() -> None:
@@ -311,8 +357,8 @@ def offline_summary_inputs(
         "miss": {"e2e_ms": [2, 3], "cached_tokens": [0, 0]},
         "hit": {"e2e_ms": [1, 2], "cached_tokens": [8, 8]},
         "distributions": {
-            "e2e_ms_miss": run_offline_benchmark.distribution_ms([2, 3]),
-            "e2e_ms_hit": run_offline_benchmark.distribution_ms([1, 2]),
+            "e2e_ms_miss": distribution_ms([2, 3]),
+            "e2e_ms_hit": distribution_ms([1, 2]),
         },
         "engine_config": {"catalog_sha256": "2" * 64},
     }
@@ -404,8 +450,8 @@ def test_legacy_logical_batch_preserves_aggregate_cache_counts(
         miss={"e2e_ms": [2], "cached_tokens": [0]},
         hit={"e2e_ms": [1], "cached_tokens": [30]},
         distributions={
-            "e2e_ms_miss": run_offline_benchmark.distribution_ms([2]),
-            "e2e_ms_hit": run_offline_benchmark.distribution_ms([1]),
+            "e2e_ms_miss": distribution_ms([2]),
+            "e2e_ms_hit": distribution_ms([1]),
         },
     )
     raw_path.write_text(json.dumps(raw), encoding="utf-8")

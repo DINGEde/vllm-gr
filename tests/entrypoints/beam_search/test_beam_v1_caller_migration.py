@@ -10,7 +10,7 @@ from typing import Any, Self
 
 import pytest
 
-from tools.AB_Tests.run_offline_benchmark import measure_e2e
+from benchmarks.open_one_rec.offline_ab import measure_e2e
 
 
 class _Engine:
@@ -179,7 +179,7 @@ def test_e2e_includes_lazy_text_and_uses_only_v1(monkeypatch: Any) -> None:
         events.append("clock")
         return len(events) * 1_000_000
 
-    monkeypatch.setattr("tools.AB_Tests.run_offline_benchmark.time.perf_counter_ns", clock)
+    monkeypatch.setattr("benchmarks.open_one_rec.offline_ab.time.perf_counter_ns", clock)
     result = measure_e2e(
         SimpleNamespace(beam_search=run), [1, 2], SimpleNamespace(beam_width=2, max_tokens=5)
     )
@@ -196,8 +196,8 @@ def test_benchmark_keeps_artifact_until_engine_shutdown(monkeypatch: Any) -> Non
     from argparse import Namespace
     from pathlib import Path
 
-    import examples.offline_inference.beam_search.offline_beam_search as example
-    from tools.AB_Tests.run_offline_benchmark import create_v1_llm
+    from benchmarks.open_one_rec.offline_ab import create_v1_llm
+    from vllm_gr.constraints import artifact_builder
     from vllm_gr.entrypoints import gr
 
     artifacts: list[Path] = []
@@ -227,7 +227,7 @@ def test_benchmark_keeps_artifact_until_engine_shutdown(monkeypatch: Any) -> Non
             assert artifacts[-1].exists()
             events.append("shutdown")
 
-    monkeypatch.setattr(example, "build_artifact", build)
+    monkeypatch.setattr(artifact_builder, "build_single_trie_artifact", build)
     monkeypatch.setattr(gr, "GRLLM", Engine)
     args = Namespace(model="model", catalog=Path("catalog"), beam_width=128, input_length=1024)
     with pytest.raises(RuntimeError, match="request failed"), create_v1_llm(args, 5):
@@ -240,8 +240,8 @@ def test_benchmark_keeps_artifact_until_engine_shutdown(monkeypatch: Any) -> Non
 def test_onerec_benchmark_closes_engine_before_deleting_artifact(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, failure_stage: str | None
 ) -> None:
-    import examples.offline_inference.beam_search.offline_beam_search as example
     from benchmarks.open_one_rec.one_rec_v1_benchmark import run_v1_benchmark
+    from vllm_gr.constraints import artifact_builder
     from vllm_gr.entrypoints import gr
 
     artifacts: list[Path] = []
@@ -290,7 +290,7 @@ def test_onerec_benchmark_closes_engine_before_deleting_artifact(
                 raise failure
             return [SimpleNamespace(sequences=[Beam(), Beam()])]
 
-    monkeypatch.setattr(example, "build_artifact", build)
+    monkeypatch.setattr(artifact_builder, "build_single_trie_artifact", build)
     monkeypatch.setattr(gr, "GRLLM", Engine)
     output = tmp_path / "result.json"
     args = SimpleNamespace(
@@ -327,8 +327,8 @@ def test_onerec_benchmark_closes_engine_before_deleting_artifact(
 
 def test_benchmark_resolves_beam_api_across_rename() -> None:
     import benchmarks.beam_search.measure_latency as performance
+    import benchmarks.open_one_rec.offline_ab as offline
     import benchmarks.open_one_rec.one_rec_v1_benchmark as onerec
-    import tools.AB_Tests.run_offline_benchmark as offline
 
     calls: list[str] = []
 
@@ -358,11 +358,57 @@ def test_benchmark_resolves_beam_api_across_rename() -> None:
 
 def test_benchmark_loads_the_artifact_builder_present_in_checkout() -> None:
     import benchmarks.open_one_rec.one_rec_v1_benchmark as onerec
-    import examples.offline_inference.beam_search.offline_beam_search as example
-    import tools.AB_Tests.run_offline_benchmark as offline
+    from vllm_gr.constraints.artifact_builder import build_single_trie_artifact
 
-    assert offline.load_build_artifact() is example.build_artifact
-    assert onerec._load_build_artifact() is example.build_artifact
+    assert onerec._load_build_artifact() is build_single_trie_artifact
+
+
+@pytest.mark.l1  # type: ignore[misc]
+@pytest.mark.parametrize("legacy_v1", [False, True])  # type: ignore[misc]
+def test_benchmark_falls_back_to_the_legacy_builder(
+    monkeypatch: pytest.MonkeyPatch, legacy_v1: bool
+) -> None:
+    import benchmarks.open_one_rec.one_rec_v1_benchmark as onerec
+
+    shared = "vllm_gr.constraints.artifact_builder"
+    legacy = "examples.offline_inference.beam_search.offline_beam_search"
+    builder = object()
+    selected = f"{legacy}_v1" if legacy_v1 else legacy
+    attempts: list[str] = []
+
+    def load(module_name: str) -> SimpleNamespace:
+        attempts.append(module_name)
+        if module_name == shared:
+            raise ModuleNotFoundError(name="vllm_gr.constraints" if legacy_v1 else shared)
+        if module_name == legacy and legacy_v1:
+            raise ModuleNotFoundError(name=legacy)
+        assert module_name == selected
+        return SimpleNamespace(build_artifact=builder)
+
+    monkeypatch.setattr(onerec, "import_module", load)
+    assert onerec._load_build_artifact() is builder
+    assert attempts == ([shared, legacy, selected] if legacy_v1 else [shared, selected])
+
+
+@pytest.mark.l1  # type: ignore[misc]
+@pytest.mark.parametrize("legacy", [False, True])  # type: ignore[misc]
+def test_benchmark_propagates_missing_builder_dependency(
+    monkeypatch: pytest.MonkeyPatch, legacy: bool
+) -> None:
+    import benchmarks.open_one_rec.one_rec_v1_benchmark as onerec
+
+    shared = "vllm_gr.constraints.artifact_builder"
+    failure = ModuleNotFoundError(name="vllm_gr.constraints.compiler")
+
+    def load(module_name: str) -> SimpleNamespace:
+        if legacy and module_name == shared:
+            raise ModuleNotFoundError(name=shared)
+        raise failure
+
+    monkeypatch.setattr(onerec, "import_module", load)
+    with pytest.raises(ModuleNotFoundError) as caught:
+        onerec._load_build_artifact()
+    assert caught.value is failure
 
 
 pytestmark = pytest.mark.cpu_test

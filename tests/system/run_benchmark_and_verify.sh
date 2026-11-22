@@ -148,9 +148,9 @@ from contextlib import redirect_stdout
 model, triples, artifact_path, backend, width = sys.argv[1:]
 artifact = Path(artifact_path)
 with redirect_stdout(sys.stderr):
-    from examples.offline_inference.beam_search.offline_beam_search import build_artifact
+    from vllm_gr.constraints.artifact_builder import build_single_trie_artifact
 
-    digest, tokenizer_digest = build_artifact(Path(model), Path(triples), artifact)
+    digest, tokenizer_digest = build_single_trie_artifact(Path(model), Path(triples), artifact)
 print(json.dumps({
     "beam_width": [int(width)] * 3,
     "beam_graph_enabled": backend == "cuda",

@@ -170,11 +170,15 @@ def test_dynamic_beam_example_wires_graphs_and_benchmark(
     artifact_path = tmp_path / "unused.safetensors"
     artifact_builds = []
 
-    def build_artifact(*paths: Path) -> tuple[str, str]:
+    def build_single_trie_artifact(*paths: Path) -> tuple[str, str]:
         artifact_builds.append(paths)
         return "artifact", "tokenizer"
 
-    monkeypatch.setattr(example, "build_artifact", build_artifact)
+    monkeypatch.setitem(
+        sys.modules,
+        "vllm_gr.constraints.artifact_builder",
+        SimpleNamespace(build_single_trie_artifact=build_single_trie_artifact),
+    )
 
     example.run(args, artifact_path if with_catalog else None)
 
@@ -264,7 +268,11 @@ def test_npu_graph_example_requires_replay_only_for_decode(
         module = ModuleType(name)
         module.__dict__.update(attributes)
         monkeypatch.setitem(sys.modules, name, module)
-    monkeypatch.setattr(example, "build_artifact", lambda *args: ("artifact", "tokenizer"))
+    monkeypatch.setitem(
+        sys.modules,
+        "vllm_gr.constraints.artifact_builder",
+        SimpleNamespace(build_single_trie_artifact=lambda *args: ("artifact", "tokenizer")),
+    )
     monkeypatch.setattr(example, "make_prompt", lambda *args: [11, 12])
     if fails:
         with pytest.raises(RuntimeError, match="capture/replay was not observed"):

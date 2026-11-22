@@ -50,12 +50,12 @@ def run(args: argparse.Namespace) -> int:
         TASK_REGISTRY,
         DataLoaderWrapper,
     )
-    from examples.offline_inference.beam_search.offline_beam_search import (
-        build_artifact,
-        load_triples,
-    )
     from tests.st.model_runner_policy_isolation import check_idle, startup_expectations
     from tests.st.multibatch_accuracy_checks import compare_output, validate_output
+    from vllm_gr.constraints.artifact_builder import (
+        build_single_trie_artifact,
+        load_triples,
+    )
     from vllm_gr.entrypoints.gr import GRLLM
     from vllm_gr.sampling_params import BeamSearchParams
 
@@ -169,7 +169,7 @@ def run(args: argparse.Namespace) -> int:
         assert artifact_info["file"] == fingerprint(artifact)
     else:
         print("Compiling full real catalog constraint artifact", flush=True)
-        digest, tokenizer_digest = build_artifact(model, triples, artifact)
+        digest, tokenizer_digest = build_single_trie_artifact(model, triples, artifact)
         artifact_info = {
             "inputs": artifact_inputs,
             "file": fingerprint(artifact),

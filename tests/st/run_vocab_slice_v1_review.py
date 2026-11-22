@@ -38,11 +38,9 @@ def main() -> None:
     os.environ["REVIEW_PROJECTION"] = args.projection
     from transformers import AutoTokenizer
 
+    from benchmarks.metrics import distribution_ms
     from benchmarks.open_one_rec.open_one_rec_dataset import OneRecDataset
-    from examples.offline_inference.beam_search.offline_beam_search import (
-        build_artifact,
-    )
-    from tools.AB_Tests.run_offline_benchmark import distribution_ms
+    from vllm_gr.constraints.artifact_builder import build_single_trie_artifact
     from vllm_gr.entrypoints.beam_search.output_processor import (
         BeamSearchOutputProcessor,
     )
@@ -65,7 +63,7 @@ def main() -> None:
     assert all(len(tokenizer.encode(x, add_special_tokens=False)) == 1023 for x in prompts)
     artifact = Path(args.output).resolve().with_suffix(".safetensors")
     artifact.parent.mkdir(parents=True, exist_ok=True)
-    digest, tokenizer_digest = build_artifact(
+    digest, tokenizer_digest = build_single_trie_artifact(
         model, Path(args.constraint_triples).resolve(), artifact
     )
     cfg = {

@@ -123,8 +123,12 @@ def _runtime(monkeypatch: pytest.MonkeyPatch) -> Any:
     def unexpected_beam_call(*args: Any, **kwargs: Any) -> Any:
         raise AssertionError("Thinking generation must not use Beam/catalog helpers")
 
-    for name in ("build_artifact", "load_triples", "make_prompt"):
-        monkeypatch.setattr(example, name, unexpected_beam_call)
+    monkeypatch.setitem(
+        sys.modules,
+        "vllm_gr.constraints.artifact_builder",
+        SimpleNamespace(build_single_trie_artifact=unexpected_beam_call),
+    )
+    monkeypatch.setattr(example, "make_prompt", unexpected_beam_call)
     state.tokenizer = tokenizer
     return state
 

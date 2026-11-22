@@ -51,9 +51,11 @@ with each pass independently initialized and warmed up. Do not install/switch
 packages between passes or run concurrent GPU workloads.
 
 Run outside both implementation checkouts. Put a common benchmark-only harness
-first on `PYTHONPATH`, followed by the implementation checkout. The harness must
-not contain `vllm_gr/`, which would shadow the implementation under comparison.
-Verify the import source and implementation revision for each pass.
+first on `PYTHONPATH`, followed by the implementation checkout. Copy the current
+`benchmarks/` package into the harness, including `benchmarks/metrics.py`.
+The harness must not contain `vllm_gr/`, which would shadow the implementation
+under comparison. Verify the import source and implementation revision for each
+pass.
 
 ## Numerical comparisons
 

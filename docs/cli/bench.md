@@ -15,7 +15,7 @@ you installed vLLM-GR from a wheel.
 | `vllm bench beam-recall --gr` | OneRec Recall on one or more tasks | CUDA | [Beam Recall](bench/beam_recall.md) |
 | `vllm bench qwen-v1 --gr` | Synthetic Beam workload on a Qwen model | CUDA | [Qwen Beam benchmark](bench/qwen_v1.md) |
 | `vllm bench beam-performance-ab --gr` | Compare recorded Beam latency runs | Host | [Comparison tool](../../benchmarks/beam_search/compare_latency_ab.py) |
-| `vllm bench ab-offline --gr` | Run an offline engine performance comparison workload | CUDA | [Offline A/B guide](../../tools/AB_Tests/README.md) |
+| `vllm bench ab-offline --gr` | Measure paired cold/warm OneRec requests | CUDA | [Offline A/B guide](../../tools/AB_Tests/README.md) |
 
 ## Command syntax
 
@@ -31,10 +31,13 @@ OneRec also accepts the earlier `open-one-rec bench throughput` spelling.
 
 ## Offline A/B
 
-Run `vllm bench ab-offline --gr` with a local CUDA environment and model.
-Both the OneRec dataset directory (`--data-dir`) and the constraint triples
-file (`--catalog`) are required. Follow the [local A/B guide](../../tools/AB_Tests/README.md)
-to rebuild the pinned catalog, measure two revisions in separate checkouts and
-virtual environments, and compare the results.
+Run `vllm bench ab-offline --gr` with a local CUDA environment and model to
+record paired cold/warm latency and prefix-cache observations for individual
+OneRec requests. Both the dataset directory (`--data-dir`) and the constraint
+triples file (`--catalog`) are required.
+
+Follow the [local A/B guide](../../tools/AB_Tests/README.md) to rebuild the pinned
+catalog, measure two revisions in separate checkouts and virtual environments,
+and turn the raw JSON files into summaries and a comparison report.
 
 For dataset preparation and measurement procedures, see [Benchmarking](../benchmarking/README.md).
