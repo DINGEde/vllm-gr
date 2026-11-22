@@ -3,10 +3,10 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM-GR project
 # Copyright contributors to the vLLM project
 # Adapted from https://github.com/vllm-project/vllm
-set -e
+set -eo pipefail
 
 scversion="v0.11.0"
-rcfile="$PWD/tools/pre_commit/.shellcheckrc"
+rcfile="$(dirname -- "${BASH_SOURCE[0]}")/.shellcheckrc"
 shellcheck_bin="$(command -v shellcheck || true)"
 
 # ShellCheck 0.10.0 and newer support an explicit rcfile.
@@ -28,10 +28,11 @@ if [ ! -x "$shellcheck_bin" ]; then
     rm "$tarball"
 fi
 
-status=0
-while IFS= read -r -d '' script; do
-    if ! git check-ignore -q "$script"; then
-        "$shellcheck_bin" -s bash --rcfile="$rcfile" "$script" || status=1
-    fi
-done < <(find . -name "*.sh" -not -path "./trc/*" -print0)
-exit "$status"
+if (( $# )); then
+    exec "$shellcheck_bin" -s bash --rcfile="$rcfile" -- "$@"
+fi
+
+# Manual full-tree check. Untracked output and ignored local tools are out of scope.
+git ls-files -z -- '*.sh' ':(exclude)trc/**' | while IFS= read -r -d '' file; do
+    "$shellcheck_bin" -s bash --rcfile="$rcfile" -- "$file" || exit $?
+done

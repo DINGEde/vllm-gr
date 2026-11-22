@@ -6,7 +6,10 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
+from stat import S_IMODE
+from typing import TextIO
 
 import pytest
 
@@ -181,8 +184,6 @@ def test_process_catalog_writes_output_file(tmp_path: Path) -> None:
             "ab_to_c": {'["1", "2"]': ["3"], '["1", "4"]': ["5"]},
         }
     finally:
-        import os
-
         if os.path.exists(output_path):
             os.remove(output_path)
 
@@ -190,6 +191,67 @@ def test_process_catalog_writes_output_file(tmp_path: Path) -> None:
 def test_process_catalog_reports_missing_input(tmp_path: Path) -> None:
     with pytest.raises(FileNotFoundError):
         process_catalog(str(tmp_path / "missing.json"), str(tmp_path / "out.json"))
+
+
+@pytest.mark.l1  # type: ignore[misc]
+@pytest.mark.skipif(os.name != "posix", reason="requires POSIX file modes")  # type: ignore[misc]
+def test_process_catalog_honors_umask_and_preserves_output_mode(tmp_path: Path) -> None:
+    catalog_path = _write_catalog(tmp_path, [["1", "2", "3"]])
+    output_path = tmp_path / "triples.json"
+    previous_umask = os.umask(0o027)
+    try:
+        process_catalog(catalog_path, str(output_path))
+        assert S_IMODE(output_path.stat().st_mode) == 0o640
+        output_path.chmod(0o664)
+        process_catalog(catalog_path, str(output_path))
+        assert S_IMODE(output_path.stat().st_mode) == 0o664
+    finally:
+        os.umask(previous_umask)
+
+
+@pytest.mark.l1  # type: ignore[misc]
+@pytest.mark.skipif(os.name != "posix", reason="requires POSIX symlinks")  # type: ignore[misc]
+@pytest.mark.parametrize("target_exists", [True, False], ids=["existing", "dangling"])  # type: ignore[misc]
+def test_process_catalog_preserves_relative_output_symlink(
+    tmp_path: Path, target_exists: bool
+) -> None:
+    catalog_path = _write_catalog(tmp_path, [["1", "2", "3"]])
+    relative_target = Path("generated/triples.json")
+    target = tmp_path / relative_target
+    target.parent.mkdir()
+    if target_exists:
+        target.write_text("old", encoding="utf-8")
+    output_path = tmp_path / "triples.json"
+    output_path.symlink_to(relative_target)
+
+    assert process_catalog(catalog_path, str(output_path)) == 1
+    assert output_path.is_symlink()
+    assert output_path.readlink() == relative_target
+    assert json.loads(target.read_text(encoding="utf-8"))["triples"] == [
+        {"a": "1", "b": "2", "c": "3"}
+    ]
+
+
+@pytest.mark.l1  # type: ignore[misc]
+def test_failed_output_write_preserves_previous_triples(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    catalog_path = _write_catalog(tmp_path, [["1", "2", "3"]])
+    output_path = tmp_path / "triples.json"
+    process_catalog(catalog_path, str(output_path))
+    original = output_path.read_bytes()
+    files = set(tmp_path.iterdir())
+
+    def interrupted_dump(_document: object, output: TextIO, **_kwargs: object) -> None:
+        output.write("{")
+        raise OSError("disk full")
+
+    monkeypatch.setattr(json, "dump", interrupted_dump)
+    with pytest.raises(OSError, match="disk full"):
+        process_catalog(catalog_path, str(output_path))
+
+    assert output_path.read_bytes() == original
+    assert set(tmp_path.iterdir()) == files
 
 
 def test_process_catalog_rejects_non_list(tmp_path: Path) -> None:
@@ -218,8 +280,6 @@ def test_process_catalog_with_sentinels(tmp_path: Path) -> None:
             document = json.load(file)
         assert document["triples"][0] == {"a": "<s_a_1>", "b": "<s_b_2>", "c": "<s_c_3>"}
     finally:
-        import os
-
         if os.path.exists(output_path):
             os.remove(output_path)
 

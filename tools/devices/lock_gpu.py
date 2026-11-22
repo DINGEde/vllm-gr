@@ -3,8 +3,10 @@
 import argparse
 import ctypes
 import os
+import subprocess
 import sys
 import time
+from uuid import UUID
 
 
 def _cuda_visible_ordinal(gpu_id: int) -> int:
@@ -14,24 +16,37 @@ def _cuda_visible_ordinal(gpu_id: int) -> int:
     so cuDeviceGet needs the ordinal within that list rather than the physical
     id reported by nvidia-smi.
     """
-    visible = os.environ.get("CUDA_VISIBLE_DEVICES", "")
-    if not visible:
+    if gpu_id < 0:
+        raise ValueError(f"Invalid physical GPU id {gpu_id}")
+    visible = os.environ.get("CUDA_VISIBLE_DEVICES")
+    if visible is None:
         return gpu_id
-    ids = [token.strip() for token in visible.split(",")]
-    try:
-        return ids.index(str(gpu_id))
-    except ValueError:
-        return gpu_id
+    tokens = visible.split(",")
+    if not all(token.isascii() and token.isdecimal() for token in tokens):
+        raise ValueError(f"Invalid CUDA_VISIBLE_DEVICES={visible!r}")
+    ids = [int(token) for token in tokens]
+    if gpu_id not in ids:
+        raise ValueError(f"GPU {gpu_id} is outside CUDA_VISIBLE_DEVICES={visible!r}")
+    return ids.index(gpu_id)
 
 
-def _lock_gpu_cuda(gpu_id: int, mem_to_alloc_mb: int) -> bool:
+def _lock_gpu_cuda(ordinal: int, expected_uuid: bytes, mem_to_alloc_mb: int) -> bool:
     try:
-        ordinal = _cuda_visible_ordinal(gpu_id)
         cuda = ctypes.CDLL("libcuda.so.1")
         if cuda.cuInit(0) != 0:
             return False
         dev = ctypes.c_int()
         if cuda.cuDeviceGet(ctypes.byref(dev), ordinal) != 0:
+            if "CUDA_VISIBLE_DEVICES" in os.environ:
+                sys.exit(f"CUDA ordinal {ordinal} is unavailable under the device mask")
+            return False
+        device_uuid = ctypes.create_string_buffer(16)
+        get_uuid = getattr(cuda, "cuDeviceGetUuid_v2", cuda.cuDeviceGetUuid)
+        if get_uuid(device_uuid, dev.value) != 0:
+            return False
+        if device_uuid.raw != expected_uuid:
+            if "CUDA_VISIBLE_DEVICES" in os.environ:
+                sys.exit(f"CUDA ordinal {ordinal} does not match the requested physical GPU")
             return False
         ctx = ctypes.c_void_p()
         if cuda.cuCtxCreate_v2(ctypes.byref(ctx), 0, dev.value) != 0:
@@ -46,8 +61,16 @@ def _lock_gpu_cuda(gpu_id: int, mem_to_alloc_mb: int) -> bool:
 
 
 def lock_gpu(gpu_id: int, mem_to_alloc_mb: int):
-    # First try CUDA driver API (most robust on headless GPU nodes)
-    if _lock_gpu_cuda(gpu_id, mem_to_alloc_mb):
+    try:
+        ordinal = _cuda_visible_ordinal(gpu_id)
+        result = subprocess.check_output(
+            ["nvidia-smi", "-i", str(gpu_id), "--query-gpu=uuid", "--format=csv,noheader"],
+            text=True,
+        )
+        expected_uuid = UUID(result.strip().removeprefix("GPU-")).bytes
+    except (ValueError, OSError, subprocess.CalledProcessError) as exc:
+        sys.exit(f"Cannot identify GPU {gpu_id}: {exc}")
+    if _lock_gpu_cuda(ordinal, expected_uuid, mem_to_alloc_mb):
         print("READY", flush=True)
         time.sleep(31536000)
         return
@@ -111,20 +134,43 @@ def lock_gpu(gpu_id: int, mem_to_alloc_mb: int):
         if eglQueryDevicesEXT(num_devices.value, devices, ctypes.byref(num_devices)) == 0:
             raise Exception("eglQueryDevicesEXT failed")
 
-        if gpu_id >= num_devices.value:
-            raise Exception(f"GPU ID {gpu_id} >= {num_devices.value} EGL devices")
-
-        display = eglGetPlatformDisplayEXT(0x313F, devices[gpu_id], None)  # EGL_PLATFORM_DEVICE_EXT
+        # EGL has its own enumeration order. Match EGL_DEVICE_UUID_EXT before
+        # creating a display or allocating any memory on the device.
+        addr = eglGetProcAddress(b"eglQueryDeviceBinaryEXT")
+        if not addr:
+            raise RuntimeError("EGL cannot verify device UUIDs")
+        query_binary = ctypes.CFUNCTYPE(
+            ctypes.c_uint,
+            ctypes.c_void_p,
+            ctypes.c_int,
+            ctypes.c_int,
+            ctypes.c_void_p,
+            ctypes.POINTER(ctypes.c_int),
+        )(addr)
+        for device in devices:
+            value = ctypes.create_string_buffer(16)
+            size = ctypes.c_int()
+            if (
+                query_binary(device, 0x335C, 16, value, ctypes.byref(size))
+                and size.value == 16
+                and value.raw == expected_uuid
+            ):
+                break
+        else:
+            raise RuntimeError(f"No EGL device matches GPU {gpu_id}")
+        display = eglGetPlatformDisplayEXT(0x313F, device, None)  # EGL_PLATFORM_DEVICE_EXT
         if not display:
             raise Exception("eglGetPlatformDisplayEXT failed")
 
+        # EGL handles are pointers, including on 64-bit headless nodes.
+        display = ctypes.c_void_p(display)
         if egl.eglInitialize(display, None, None) == 0:
             raise Exception("eglInitialize failed")
         if egl.eglBindAPI(0x30A2) == 0:
             raise Exception("eglBindAPI failed")  # EGL_OPENGL_API
 
         config_attribs = (ctypes.c_int * 7)(
-            0x3028,
+            0x3033,
             0x0001,  # EGL_SURFACE_TYPE, EGL_PBUFFER_BIT
             0x3040,
             0x0008,  # EGL_RENDERABLE_TYPE, EGL_OPENGL_BIT
@@ -141,15 +187,18 @@ def lock_gpu(gpu_id: int, mem_to_alloc_mb: int):
                 ctypes.byref(num_configs),
             )
             == 0
+            or not num_configs.value
         ):
             raise Exception("eglChooseConfig failed")
 
-        ctx = egl.eglCreateContext(display, config, 0, None)
+        egl.eglCreateContext.restype = ctypes.c_void_p
+        ctx = ctypes.c_void_p(egl.eglCreateContext(display, config, None, None))
         if not ctx:
             raise Exception("eglCreateContext failed")
 
         pbuffer_attribs = (ctypes.c_int * 5)(0x3057, 1, 0x3056, 1, 0x3038)  # WIDTH, HEIGHT
-        surface = egl.eglCreatePbufferSurface(display, config, pbuffer_attribs)
+        egl.eglCreatePbufferSurface.restype = ctypes.c_void_p
+        surface = ctypes.c_void_p(egl.eglCreatePbufferSurface(display, config, pbuffer_attribs))
         if not surface:
             raise Exception("eglCreatePbufferSurface failed")
 
@@ -168,6 +217,8 @@ def lock_gpu(gpu_id: int, mem_to_alloc_mb: int):
         ]
         size = ctypes.c_size_t(mem_to_alloc_mb * 1024 * 1024)
         gl.glBufferData(0x8892, size, None, 0x88E4)  # GL_STATIC_DRAW
+        if not buf.value or gl.glGetError() != 0:
+            raise RuntimeError("OpenGL buffer allocation failed")
 
         # Indicate we're ready after allocation succeeds
         print("READY", flush=True)

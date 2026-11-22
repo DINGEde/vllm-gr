@@ -31,6 +31,8 @@ import argparse
 import json
 import logging
 from pathlib import Path
+from stat import S_IMODE
+from tempfile import TemporaryDirectory
 from typing import Any
 
 from vllm_gr.constraints.json_compiler import compile_relations_json
@@ -81,12 +83,21 @@ def process_catalog(
     )
     triples = document["triples"]
 
-    output_dir = output_file.parent
-    if str(output_dir):
-        output_dir.mkdir(parents=True, exist_ok=True)
+    output_file.parent.mkdir(parents=True, exist_ok=True)
+    output_file = output_file.resolve()
+    try:
+        existing_mode = S_IMODE(output_file.stat().st_mode)
+    except FileNotFoundError:
+        existing_mode = None
 
-    with output_file.open("w", encoding="utf-8") as file:
-        json.dump(document, file, indent=2, ensure_ascii=False)
+    # Stage on the same filesystem and let normal file creation honor the umask.
+    with TemporaryDirectory(dir=output_file.parent) as staging_dir:
+        temporary = Path(staging_dir) / output_file.name
+        with temporary.open("x", encoding="utf-8") as file:
+            json.dump(document, file, indent=2, ensure_ascii=False)
+        if existing_mode is not None:
+            temporary.chmod(existing_mode)
+        temporary.replace(output_file)
 
     return len(triples)
 

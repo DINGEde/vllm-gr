@@ -22,6 +22,10 @@ The [hook configuration](../../.pre-commit-config.yaml) installs both the
 | `pre-commit run --all-files` | Run applicable hooks across the checkout. |
 | `pre-commit run markdownlint --files docs/contributing/pre_commit_setup.md` | Run one named hook on the listed file. |
 
+The regex import, CUDA API, ShellCheck, and Excalidraw PNG hooks honor the
+selected file list. To check tracked shell scripts directly, run
+`bash tools/pre_commit/shellcheck.sh` from the repository root.
+
 !!! warning "Select a named hook for targeted checks"
 
     `pre-commit run --files` can trigger `run-tests` if you omit the hook ID.

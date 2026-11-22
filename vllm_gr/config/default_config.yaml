@@ -33,10 +33,10 @@ gr:
   constraint_table: null                   # Required in table mode. Paths resolve relative to the declaring YAML.
 
   # Build a table from the repository root; replace --model with the inference model directory.
-  # The example contains OneRec video SID triples; replace --triples for other applications.
+  # Generate the OneRec video SID triples using tools/AB_Tests/README.md.
   # python tools/constraints/build_constraint_table.py \
   #   --model /absolute/path/to/OneRec-1.7B \
-  #   --triples tools/AB_Tests/constraints/video_constraint_triples.json \
+  #   --triples /absolute/path/to/video-constraint-triples.json \
   #   --output "$PWD/video_constraint_table.safetensors"
   # Remote model IDs require --revision; custom model code requires --trust-remote-code.
   # To enable, set constraint_mode: table and replace constraint_table: null with this mapping.

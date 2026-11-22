@@ -32,10 +32,9 @@ OneRec also accepts the earlier `open-one-rec bench throughput` spelling.
 ## Offline A/B
 
 Run `vllm bench ab-offline --gr` with a local CUDA environment and model.
-Pass the OneRec dataset directory with `--data-dir`. Pass the constraint
-triples with `--catalog` when the checkout has no bundled catalog.
-The [catalog guide](../../examples/online_serving/catalog/README.md#build-a-catalog-from-the-onerec-dataset)
-shows how to prepare the triples. Follow the [local A/B guide](../../tools/AB_Tests/README.md)
-to measure two revisions in separate environments and compare the results.
+Both the OneRec dataset directory (`--data-dir`) and the constraint triples
+file (`--catalog`) are required. Follow the [local A/B guide](../../tools/AB_Tests/README.md)
+to rebuild the pinned catalog, measure two revisions in separate checkouts and
+virtual environments, and compare the results.
 
 For dataset preparation and measurement procedures, see [Benchmarking](../benchmarking/README.md).

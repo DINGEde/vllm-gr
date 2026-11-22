@@ -164,6 +164,8 @@ def test_e2e_includes_lazy_text_and_uses_only_v1(monkeypatch: Any) -> None:
     events: list[str] = []
 
     class Beam:
+        tokens = (1, 2, 3, 4, 5, 6, 7)
+
         @property
         def text(self) -> str:
             events.append("decode")
@@ -178,9 +180,16 @@ def test_e2e_includes_lazy_text_and_uses_only_v1(monkeypatch: Any) -> None:
         return len(events) * 1_000_000
 
     monkeypatch.setattr("tools.AB_Tests.run_offline_benchmark.time.perf_counter_ns", clock)
-    result = measure_e2e(SimpleNamespace(beam_search=run), [1, 2], SimpleNamespace(max_tokens=5))
+    result = measure_e2e(
+        SimpleNamespace(beam_search=run), [1, 2], SimpleNamespace(beam_width=2, max_tokens=5)
+    )
     assert events == ["clock", "v1", "decode", "decode", "clock"]
-    assert result == {"e2e_ms": 4.0, "returned_beams": 2, "aggregate_output_tokens": 10}
+    assert result == {
+        "e2e_ms": 4.0,
+        "cached_tokens": None,
+        "returned_beams": 2,
+        "aggregate_output_tokens": 10,
+    }
 
 
 def test_benchmark_keeps_artifact_until_engine_shutdown(monkeypatch: Any) -> None:
@@ -245,7 +254,7 @@ def test_onerec_benchmark_closes_engine_before_deleting_artifact(
         return "artifact-digest", "tokenizer-digest"
 
     class Beam:
-        tokens = [1, 2, 10, 20, 30, 40, 50]
+        tokens = (1, 2, 10, 20, 30, 40, 50)
         cum_logprob = -1.0
 
         @property

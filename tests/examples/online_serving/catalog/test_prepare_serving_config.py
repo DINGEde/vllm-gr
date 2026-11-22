@@ -127,6 +127,8 @@ def test_interrupted_publish_preserves_referenced_tables(
     replace = Path.replace
 
     def interrupt_replace(source: Path, target: Path) -> Path:
+        if target != config:
+            return replace(source, target)
         if after_replace:
             replace(source, target)
         raise KeyboardInterrupt

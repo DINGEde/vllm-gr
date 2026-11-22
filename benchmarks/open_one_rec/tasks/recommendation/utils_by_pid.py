@@ -11,9 +11,10 @@ Functions for PID extraction and recommendation metrics computation using PIDs.
 import json
 import logging
 import random
-import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
+
+import regex as re
 
 logger = logging.getLogger(__name__)
 

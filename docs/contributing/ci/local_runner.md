@@ -28,7 +28,7 @@ or the [Ascend system tests](../../../tests/st/test_onerec_v1_npu_e2e.py).
 | Platform | What the runner executes |
 | --- | --- |
 | CUDA | Runs `pre-commit run --all-files` on the selected devices, including the test hook. |
-| Ascend NPU | Checks the vendor runtime, installs or builds xllm-ops if needed, loads the custom operators, then runs the test hook directly. Run other [pre-commit checks](../pre_commit_setup.md#choose-the-scope) separately when needed. |
+| Ascend NPU | Checks the vendor runtime, probes and builds xllm-ops as needed, loads the custom operators, then runs the test hook directly. Run other [pre-commit checks](../pre_commit_setup.md#choose-the-scope) separately when needed. |
 
 ### Ascend test runtime
 
@@ -50,6 +50,10 @@ VLLM_GR_TARGET_DEVICE=npu python3 -m pip install -e ".[dev]" --no-build-isolatio
 
 Run the suite on your assigned devices as described above. The runner also
 checks the vendor runtime before its resource tests and operator setup.
+The xllm-ops installer checks the Python bindings for the required operators,
+including `rec_constrained_topk`, before and after a build. The runner loads
+the vendor's `bin/set_env.bash` when present. The fallback requires a single
+`set_env.bash` elsewhere in the vendor directory.
 
 ## Select devices and test levels
 
@@ -64,6 +68,12 @@ The [optional resource helpers](../../../tools/devices/resource.sh) are for
 single-host development. Use the scheduler or reservation mechanism to
 allocate devices on shared hosts. Callers own cleanup of processes started
 by the lock helpers.
+
+An unset visibility mask allows all enumerated devices, and an empty mask
+exposes none. Malformed masks stop selection. The helpers intersect valid
+masks with the available devices and skip devices whose telemetry is missing
+or invalid. CUDA locks verify the physical device UUID. Ascend locks use
+sleep processes as advisory markers.
 
 By default the test hook runs the full pytest suite with `--run-slow`. Set
 `VLLM_GR_TEST_LEVEL=pr` to select L1 and L2. For a CUDA level run, set

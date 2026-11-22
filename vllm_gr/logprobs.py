@@ -5,6 +5,10 @@ per-element append."""
 
 import itertools
 from collections.abc import Iterable
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from vllm.logprobs import FlatLogprobs
 
 __all__ = [
     "append_fast",
@@ -13,11 +17,11 @@ __all__ = [
 
 
 def append_fast(
-    self,
+    self: "FlatLogprobs",
     token_ids: list[int],
     logprobs: list[float],
-    ranks: "Iterable[int | None] | list[int | None]",
-    decoded_tokens: "Iterable[str | None]",
+    ranks: Iterable[int | None] | None,
+    decoded_tokens: Iterable[str | None] | None,
 ) -> None:
     self.start_indices.append(len(self.logprobs))
     self.token_ids.extend(token_ids)

@@ -42,29 +42,30 @@ function is_available_npu() {
     local card_id=$(( npu_id / nchip ))
     local chip_id=$(( npu_id % nchip ))
 
-    # Get memory usage data
-    local usage_data=$(npu-smi info -t usages -i $card_id -c $chip_id)
-
-    # Extract HBM Capacity and Usage Rate
-    local hbm_capacity=$(echo "$usage_data" | grep -i "HBM Capacity" | awk -F': *' '{print $2}' | tr -cd '0-9')
-    local usage_rate=$(echo "$usage_data" | grep -i "HBM Usage Rate" | awk -F': *' '{print $2}' | tr -cd '0-9')
-
-    # Calculate used memory percentage
-    local used_memory_percent=$((hbm_capacity * usage_rate / 100))
-
-    # Check against threshold
-    if (( used_memory_percent <= threshold )); then
-        return 0
-    else
-        return 1
-    fi
+    local usage_data
+    usage_data=$(npu-smi info -t usages -i "$card_id" -c "$chip_id") || return 1
+    # Missing or malformed telemetry must never make a device look idle.
+    awk -F ':' -v threshold="$threshold" '
+        $1 ~ /^[[:space:]]*HBM Capacity[[:space:]]*\(MB\)[[:space:]]*$/ {
+            capacity = $2; capacities++
+        }
+        $1 ~ /^[[:space:]]*HBM Usage Rate[[:space:]]*\(%\)[[:space:]]*$/ {
+            rate = $2; rates++
+        }
+        END {
+            integer = "^[[:space:]]*[0-9]+[[:space:]]*$"
+            exit !(capacities == 1 && rates == 1 && capacity ~ integer && rate ~ integer &&
+                   capacity + 0 > 0 && rate + 0 <= 100 &&
+                   int(capacity * rate / 100) <= threshold)
+        }
+    ' <<< "$usage_data"
 }
 
 # _npu_device_indices <total>
 # Prints the logical NPU device ids to consider, one per line. Honors
 # ASCEND_RT_VISIBLE_DEVICES (a comma-separated list of logical device ids, the
 # same ids get_npu returns) so selection stays inside the devices the CANN
-# runtime can see. Falls back to all ids when unset/empty.
+# runtime can see. Falls back to all ids when unset; an empty mask exposes none.
 function _npu_device_indices() {
     local total=$1
     if ! [[ -v ASCEND_RT_VISIBLE_DEVICES ]]; then
@@ -80,16 +81,16 @@ function _npu_device_indices() {
         echo "ASCEND_RT_VISIBLE_DEVICES is set but empty: no devices visible" >&2
         return 1
     fi
-    local idx
-    local found=0
+    if [[ ! $ASCEND_RT_VISIBLE_DEVICES =~ ^[0-9]+(,[0-9]+)*$ ]]; then
+        echo "Invalid ASCEND_RT_VISIBLE_DEVICES: expected comma-separated non-negative integers" >&2
+        return 1
+    fi
+    local idx found=0
+    local -a indices
     IFS=',' read -ra indices <<< "$ASCEND_RT_VISIBLE_DEVICES"
     for idx in "${indices[@]}"; do
-        if [[ ! "$idx" =~ ^[0-9]+$ ]]; then
-            echo "Invalid ASCEND_RT_VISIBLE_DEVICES token '$idx': expected a non-negative integer" >&2
-            return 1
-        fi
         if [ "$idx" -lt "$total" ]; then
-            echo "$idx"
+            echo "$((10#$idx))"
             found=$((found + 1))
         fi
     done
@@ -110,8 +111,8 @@ function get_npu() {
     total=$(( ncount * nchip ))
 
     local indices
-    indices=$(_npu_device_indices "$total")
-    if [ -z "$indices" ]; then echo "No NPUs visible to CANN"; return 1; fi
+    indices=$(_npu_device_indices "$total") || return 1
+    if [ -z "$indices" ]; then echo "No NPUs visible to CANN" >&2; return 1; fi
 
     local start_time=$(date +%s)
 
@@ -127,7 +128,7 @@ function get_npu() {
         if [ "$timeout_secs" -gt 0 ]; then
             local current_time=$(date +%s)
             if [ $((current_time - start_time)) -ge "$timeout_secs" ]; then
-                echo "Timeout reached"
+                echo "Timeout reached" >&2
                 return 1
             fi
         fi
@@ -145,7 +146,7 @@ function get_npus() {
     local total=$(( ncount * nchip ))
 
     local indices
-    indices=$(_npu_device_indices "$total")
+    indices=$(_npu_device_indices "$total") || return 1
     if [ -z "$indices" ]; then return 1; fi
 
     local start_time=$(date +%s)
@@ -177,7 +178,7 @@ function get_npus() {
         if [ "$timeout_secs" -gt 0 ]; then
             local current_time=$(date +%s)
             if [ $((current_time - start_time)) -ge "$timeout_secs" ]; then
-                echo "Timeout reached"
+                echo "Timeout reached" >&2
                 return 1
             fi
         fi
@@ -226,8 +227,7 @@ function lock_npus() {
     IFS=',' read -ra npus <<< "$npus_list"
     for npu in "${npus[@]}"; do
         local pid
-        pid=$(lock_npu "$npu")
-        if [ -z "$pid" ]; then
+        if ! pid=$(lock_npu "$npu") || [ -z "$pid" ]; then
             # Lock failed — roll back any NPUs locked so far
             if [ -n "$pids" ]; then
                 unlock_npus "$pids"
@@ -247,8 +247,11 @@ function lock_npus() {
 
 function unlock_npus() {
     local pids_list=$1
-    IFS=',' read -ra pids <<< "$pids_list"
-    for pid in "${pids[@]}"; do
-        unlock_npu "$pid"
+    local -a lock_pids
+    local pid status=0
+    IFS=',' read -ra lock_pids <<< "$pids_list"
+    for pid in "${lock_pids[@]}"; do
+        unlock_npu "$pid" || status=1
     done
+    return "$status"
 }

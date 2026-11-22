@@ -50,60 +50,29 @@ PY
     return 1
 }
 
-probe_xllm_ops() {
-    command -v python3 >/dev/null 2>&1 || return 1
+# shellcheck source=tools/npu/xllm_env.sh
+source "${SCRIPT_DIR}/xllm_env.sh"
 
+probe_xllm_ops() (
+    command -v python3 >/dev/null 2>&1 || return 1
+    if [[ -n ${ASCEND_TOOLKIT_ENV:-} ]]; then
+        # shellcheck disable=SC1090
+        source "${ASCEND_TOOLKIT_ENV}" || return 1
+    fi
+    load_xllm_env --if-installed || return 1
     python3 - <<'PY'
-import ctypes.util
-import importlib.util
-import os
-import subprocess
 import sys
 
-# A Python package/module is a valid installation signal.
-module_present = any(
-    importlib.util.find_spec(name) is not None
-    for name in ("xllm_ops", "custom_ops_lib")
-)
+# Import Torch first, as the runtime does, to load the binding's dependencies.
+import torch  # noqa: F401
+import custom_ops_lib
 
-# The vendored wrapper loads the shared object through -lxllm_ops.  Check both
-# the dynamic linker and common explicit library paths.
-library_present = ctypes.util.find_library("xllm_ops") is not None
-for root in filter(None, os.environ.get("LD_LIBRARY_PATH", "").split(":")):
-    for filename in ("libxllm_ops.so", "xllm_ops.so"):
-        if os.path.isfile(os.path.join(root, filename)):
-            library_present = True
-
-try:
-    output = subprocess.run(
-        ["ldconfig", "-p"],
-        check=False,
-        capture_output=True,
-        text=True,
-    ).stdout
-    library_present = library_present or "xllm_ops" in output
-except (FileNotFoundError, OSError):
-    pass
-
-if not (module_present or library_present):
-    raise SystemExit(1)
-
-# If the project wrapper is importable, require at least one registered op.
-# Import errors are treated as a failed probe so a broken library is rebuilt.
-try:
-    spec = importlib.util.find_spec("vllm_ascend.ops.xllm_ops")
-    if spec is not None:
-        module = __import__("vllm_ascend.ops.xllm_ops", fromlist=["*"])
-        if hasattr(module, "x_attention"):
-            raise SystemExit(0)
-except Exception:
-    raise SystemExit(1)
-
-# A discoverable shared object/package is sufficient when the wrapper is not
-# installed in this environment yet.
-raise SystemExit(0)
+required = ("cache_unshared_kv", "x_attention", "select_unshared_kv", "rec_constrained_topk")
+missing = [name for name in required if not callable(getattr(custom_ops_lib, name, None))]
+if missing:
+    sys.exit(f"custom_ops_lib is missing callable operators: {', '.join(missing)}")
 PY
-}
+)
 
 run_build() {
     if [[ -n "${XLLM_OPS_BUILD_SCRIPT:-}" ]]; then
@@ -153,7 +122,10 @@ run_build() {
         cd "${XLLM_OPS_DIR}"
         # shellcheck disable=SC1090
         source "${ascend_toolkit_env}"
-        bash build.sh
+        bash build.sh \
+            -n 'beam_search_group;cache_unshared_kv;select_unshared_kv;x_attention;onerec_final_beam_select;rec_constrained_top_k' \
+            --no-build-transformer --no-build-flash
+        load_xllm_env
         cd test/python_test
         bash build_and_run.sh
     )

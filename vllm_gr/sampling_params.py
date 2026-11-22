@@ -8,11 +8,11 @@ from vllm_gr.config import MAX_BEAM_WIDTH, MAX_CANDIDATE_WIDTH
 
 
 class BeamSearchParams(
-    BaseBeamSearchParams,
+    BaseBeamSearchParams,  # type: ignore[misc]
     omit_defaults=True,  # type: ignore[call-arg]
     # required for @cached_property.
     dict=True,
-):  # type: ignore[call-arg]
+):
     """Beam search parameters for text generation."""
 
     begin_token: str | None = None

@@ -49,7 +49,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 if [ -n "${CONDA_PREFIX:-}" ]; then
-    export LD_LIBRARY_PATH=${CONDA_PREFIX}/lib:${LD_LIBRARY_PATH:-}
+    export LD_LIBRARY_PATH="${CONDA_PREFIX}/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
     export PATH=${CONDA_PREFIX}/bin:${PATH:-}
 fi
 
@@ -127,23 +127,11 @@ if [ "${npu_state:-false}" == "true" ]; then
     # library is available before entering the pre-commit/test gate. The
     # installer is a no-op on non-NPU hosts and skips work when already ready.
     echo "ASCEND_TOOLKIT_HOME=${ASCEND_TOOLKIT_HOME:-}"
-    run_test_workdir="$(pwd)"
     ASCEND_RT_VISIBLE_DEVICES=$idle_gpu \
     bash tools/npu/install_xllm_ops.sh
 
-    CUSTOM_XLLM_VENDORS_ROOT="${ASCEND_TOOLKIT_HOME}/opp/vendors"
-    CUSTOM_XLLM_MATH_ROOT="${CUSTOM_XLLM_VENDORS_ROOT}/custom_xllm_math"
-    CUSTOM_XLLM_MATH_SET_ENV=$(find "${CUSTOM_XLLM_MATH_ROOT}" -name set_env.bash -print -quit)
-    test -n "${CUSTOM_XLLM_MATH_SET_ENV}" || {
-        echo "set_env.bash not found under ${CUSTOM_XLLM_MATH_ROOT}"
-        exit 1
-    }
-    echo "Found set_env.bash at ${CUSTOM_XLLM_MATH_SET_ENV}"
-    CUSTOM_XLLM_MATH_LIB="${CUSTOM_XLLM_MATH_ROOT}/op_api/lib"
-    export LD_LIBRARY_PATH="${CUSTOM_XLLM_MATH_LIB}:${LD_LIBRARY_PATH}"
-    # shellcheck source=/dev/null
-    source "${CUSTOM_XLLM_MATH_ROOT}/bin/set_env.bash"
-    cd "${run_test_workdir}"
+    source tools/npu/xllm_env.sh
+    load_xllm_env
 
     PYTORCH_NPU_ALLOW_FORK=true \
     VLLM_WORKER_MULTIPROC_METHOD="spawn" \

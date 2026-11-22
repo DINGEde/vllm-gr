@@ -81,9 +81,11 @@ repos:
       args:
         - -c
         - |
-          if ! grep -q "^Signed-off-by: $(git config user.name) <$(git config user.email)>" "$(git rev-parse --git-path COMMIT_EDITMSG)"; then
-            printf "\nSigned-off-by: $(git config user.name) <$(git config user.email)>\n" >> "$(git rev-parse --git-path COMMIT_EDITMSG)"
+          signoff="Signed-off-by: $(git config user.name) <$(git config user.email)>"
+          if ! grep -Fxq -e "$signoff" -e "$signoff"$'\r' -- "$1"; then
+            printf '\n%s\n' "$signoff" >> "$1"
           fi
+        - signoff-commit
       language: system
       verbose: true
       stages: [commit-msg]
@@ -113,6 +115,7 @@ repos:
       entry: tools/pre_commit/shellcheck.sh
       language: script
       types: [shell]
+      exclude: ^trc/
       require_serial: true
 
     - id: png-lint
@@ -146,8 +149,9 @@ repos:
       entry: python tools/pre_commit/enforce_regex_import.py
       language: python
       types: [python]
-      pass_filenames: false
-      additional_dependencies: [regex]
+      # Standalone tooling relies on the standard library.
+      # GPU A/B also checks the SID validator against the baseline source.
+      exclude: ^(setup\.py|collect_env\.py|tools/pre_commit/check_spdx_header\.py|benchmarks/beam_search/sid_validation\.py)$
 
   # prevent use torch.cuda APIs
     - id: check-torch-cuda-call

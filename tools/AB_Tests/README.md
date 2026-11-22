@@ -1,20 +1,38 @@
 # A/B benchmark utilities
 
 Use the [`ab-offline` CLI](../../docs/cli/bench.md#offline-ab) with your local
-CUDA runtime, model, and OneRec dataset. The
-[OneRec catalog guide](../../examples/online_serving/catalog/README.md#build-a-catalog-from-the-onerec-dataset)
-shows how to generate the constraint triples to pass with `--catalog`.
+CUDA runtime and model. Supply both `--data-dir` and `--catalog`.
 
 The video benchmark uses the gated OpenOneRec dataset. Accept its terms, run
-`hf auth login`, and use the downloader to write the data and its manifest.
+`hf auth login`, and download the pinned RecIF revision and its manifest.
+Use a local model snapshot or pass a full Hub commit with `--model-revision`.
 
 ```bash
-python tools/AB_Tests/download_onerec_dataset.py --data-dir /path/to/onerec
-
-vllm bench ab-offline --gr \
-  --model /path/to/OneRec --data-dir /path/to/onerec --catalog /path/to/triples.json \
-  --beam-width 128 --input-length 1024 --output /path/to/ab-result.json
+DATA_DIR=/path/to/onerec
+python tools/AB_Tests/download_onerec_dataset.py --tasks video --data-dir "$DATA_DIR"
+python tools/AB_Tests/download_onerec_dataset.py --tasks video --data-dir "$DATA_DIR" --verify-only
 ```
+
+The manifest records the downloaded revision, file sizes, and SHA-256 hashes.
+Verification checks the files without writing. To replace a manifest from an
+older downloader, run the download command before verifying.
+
+To rebuild the video triples, use `benchmark_data/video/video_test.parquet`
+from `OpenOneRec/OpenOneRec-RecIF@8f7cf2ee0b949e955a87a708d02024687be232c8`.
+The downloaded parquet has SHA-256
+`66079915e3c3daab7df3487f9babb658df99ec1672c3ef42d7893d87cef2e6d8`.
+From the source checkout, run:
+
+```bash
+python benchmarks/open_one_rec/tools/create_task_catalog.py \
+  -t video -d "$DATA_DIR" -o "$DATA_DIR/video-sid-sequences.json"
+PYTHONPATH=. python tools/constraints/build_constraint_triples.py \
+  --catalog "$DATA_DIR/video-sid-sequences.json" \
+  --begin '<|sid_begin|>' --end '<|sid_end|>' \
+  --output "$DATA_DIR/video-constraint-triples.json"
+```
+
+The rebuilt catalog contains 234,749 video triples. Use it for both checkouts.
 
 ## Compare revisions
 
@@ -66,7 +84,7 @@ same model, data, and catalog paths for both runs and save separate outputs.
 ```bash
 MODEL=/path/to/OneRec
 DATA_DIR=/path/to/onerec
-CATALOG=/path/to/triples.json
+CATALOG="$DATA_DIR/video-constraint-triples.json"
 
 measure_checkout() (
   set -eu
@@ -108,11 +126,44 @@ PY
 )
 ```
 
-Keep the dataset manifest and verified Git SHAs with the results. Convert the
-raw results with `generate_summary.py` and compare the resulting summaries with
-`compare_ab.py`.
+Keep the dataset manifest and verified Git SHAs with the results. In each
+checkout's activated environment, convert its raw result with the same
+measurement options. For example:
+
+```bash
+python tools/AB_Tests/generate_summary.py \
+  --execution-mode offline --raw-result /path/to/baseline.json \
+  --dataset-manifest "$DATA_DIR/.onerec-manifest.json" \
+  --git-sha "$(git rev-parse HEAD)" --git-subject "$(git log -1 --format=%s)" \
+  --run-id baseline --warmup-requests 4 --beam-width 128 --input-length 1024 \
+  --output /path/to/baseline-summary.json
+```
 
 Direct `generate_summary.py` invocations accept `--repo-dir` for compatibility.
-Online summaries require `--catalog-path` matching the server configuration.
-Supply `--gpu-uuid` when you have the full UUID of the device that ran the benchmark.
-Without a UUID, the summary records the GPU identity as unknown.
+Online summaries require `--catalog-path` matching the server configuration and
+`--service-metrics`. To record GPU metadata, pass the full `--gpu-uuid` of the
+measured device on a host that can query it. Without it the device is unknown.
+
+Compare from the updated checkout:
+
+```bash
+python tools/AB_Tests/compare_ab.py \
+  --base /path/to/baseline-summary.json --head /path/to/head-summary.json \
+  --label "Local OneRec A/B" --output /path/to/ab.md --json-output /path/to/ab.json
+```
+
+Repeat `--base` or `--head` to include additional measurements of the same
+revision. The report shows the number of measurements and total samples for
+each side. It compares the median of each per-measurement latency metric.
+
+For a cache-hit performance verdict, each run needs at least 100 measured
+requests, comparable input fingerprints and measurement environments, and
+`VLLM_GR_LIGHTWEIGHT_TIMING=0`. Every cold call must reuse zero prefix-cache tokens
+and every repeated call must reuse at least one. The driver reads the counters
+outside the timed Beam call. A fixed-work verdict requires the same ordered
+warm cached-token counts across all measurements. Differences in reuse yield
+descriptive latency. A dataset SHA recorded only in the manifest,
+an older summary with incomplete evidence, a smoke run, or unconfirmed cache
+observations yield descriptive latency. For v3 single-request samples, cache
+counts above the recorded input length plus the SID start token are invalid.
+Invalid latency and conflicting measured inputs also stop comparison.

@@ -15,8 +15,10 @@ pytestmark = [pytest.mark.cpu_test, pytest.mark.l1]
 SCRIPT = Path(collect_env.__file__).resolve()
 
 
-@pytest.mark.parametrize("installed", [False, True], ids=["empty", "wheel-metadata"])
-def test_standalone_report_without_site_packages(tmp_path, installed):
+@pytest.mark.parametrize(  # type: ignore[misc]
+    "installed", [False, True], ids=["empty", "wheel-metadata"]
+)
+def test_standalone_report_without_site_packages(tmp_path: Path, installed: bool) -> None:
     script = tmp_path / "collect_env.py"
     script.write_bytes(SCRIPT.read_bytes())
     # Include installed wheel metadata without making any runtime importable.
@@ -41,7 +43,7 @@ def test_standalone_report_without_site_packages(tmp_path, installed):
     assert f"vLLM-GR Version              : {expected}\n" in result.stdout
 
 
-def test_standalone_report_with_broken_runtime(tmp_path):
+def test_standalone_report_with_broken_runtime(tmp_path: Path) -> None:
     script = tmp_path / "collect_env.py"
     script.write_bytes(SCRIPT.read_bytes())
     dist = tmp_path / "torch-2.10.0.dist-info"
@@ -59,7 +61,7 @@ def test_standalone_report_with_broken_runtime(tmp_path):
     assert "CUDA_VISIBLE_DEVICES=0" in output.splitlines()
 
 
-def test_probe_timeout_does_not_prevent_the_next_probe(monkeypatch):
+def test_probe_timeout_does_not_prevent_the_next_probe(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(collect_env, "PROBE_TIMEOUT_SECONDS", 0.2)
     code, _, reason = collect_env.run([sys.executable, "-c", "import time; time.sleep(30)"])
     assert code != 0
@@ -68,7 +70,9 @@ def test_probe_timeout_does_not_prevent_the_next_probe(monkeypatch):
     assert collect_env.run([sys.executable, "-c", "print('next')"]) == (0, "next", "")
 
 
-def test_empty_crash_directory_preserves_report(tmp_path, monkeypatch, capsys):
+def test_empty_crash_directory_preserves_report(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
     crash = SimpleNamespace(DEFAULT_MINIDUMP_DIR=str(tmp_path))
     torch = SimpleNamespace(utils=SimpleNamespace(_crash_handler=crash))
     monkeypatch.setattr(collect_env, "TORCH_AVAILABLE", True)
@@ -78,7 +82,7 @@ def test_empty_crash_directory_preserves_report(tmp_path, monkeypatch, capsys):
     assert "report" in capsys.readouterr().out
 
 
-def test_public_gr_environment_is_sorted_and_filtered(monkeypatch):
+def test_public_gr_environment_is_sorted_and_filtered(monkeypatch: pytest.MonkeyPatch) -> None:
     # A plugin registration must not make a private GR variable reportable.
     registry = SimpleNamespace(environment_variables={"CUDA_VISIBLE_DEVICES", "VLLM_GR_PRIVATE"})
     monkeypatch.setitem(sys.modules, "vllm.envs", registry)
