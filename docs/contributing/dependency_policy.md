@@ -30,6 +30,12 @@ built from a source distribution must retain that distribution's version.
 See [setup.py](../../setup.py) and the [Git version helper](../../tools/packaging/git_version.py)
 for release tags and version overrides.
 
+A clean release tag retains its tagged version. Development commits use the
+declared base version when its release line is newer than the nearest release
+tag; otherwise they advance to the next patch or RC. Built-in providers accept
+GR development and release versions on the supported `0.31` line, starting at
+`0.31.0.dev0`; the exact vLLM and vendor runtime pins still apply.
+
 ## Packaging validation
 
 With the development dependencies installed, run the packaging tests after

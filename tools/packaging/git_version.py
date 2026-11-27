@@ -41,6 +41,11 @@ def checkout_version(repo: Path, base: str) -> str:
         else:
             prefix, dot, patch = release.rpartition(".")
             next_release = f"{prefix}{dot}{int(patch) + 1}"
+        # An upgrade checkout can target a newer release line before its first tag.
+        if tuple(map(int, base.partition("rc")[0].split("."))) > tuple(
+            map(int, release.partition("rc")[0].split("."))
+        ):
+            next_release = base
     else:
         node = "g" + parts[0]
         distance = git("rev-list", "--count", "HEAD")

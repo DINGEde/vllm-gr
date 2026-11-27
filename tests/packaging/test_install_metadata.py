@@ -190,16 +190,38 @@ def test_release_version_by_device(version_source: _SetupModule, device: str) ->
     _assert_version(version_source, f"0.31.0{suffix}")
 
 
-@pytest.mark.parametrize("release_tag", [None, "0.30.1", "0.30.1rc1"])  # type: ignore[misc]
-def test_git_version_source(version_source: _SetupModule, release_tag: str | None) -> None:
+@pytest.mark.parametrize(  # type: ignore[misc]
+    ("base", "release_tag", "next_release"),
+    [
+        ("0.31.0", None, "0.31.0"),
+        ("0.30.1", "0.30.1", "0.30.2"),
+        ("0.30.1", "0.30.1rc1", "0.30.1rc2"),
+        ("0.31.0", "0.30.0", "0.31.0"),
+        ("0.31.0", "0.30.1rc1", "0.31.0"),
+        ("0.31.0", "0.31.0", "0.31.1"),
+        ("0.31.0", "0.31.0rc1", "0.31.0rc2"),
+    ],
+)
+def test_git_version_source(
+    version_source: _SetupModule,
+    monkeypatch: pytest.MonkeyPatch,
+    base: str,
+    release_tag: str | None,
+    next_release: str,
+) -> None:
     root = version_source.ROOT_DIR
     _init_git(root)
+    monkeypatch.setattr(version_source, "VLLM_GR_BASE_VERSION", base)
     version_source._cached_device = "npu"
     if release_tag:
         _git(root, "tag", f"v{release_tag}")
         _assert_version(version_source, f"{release_tag}+npu")
 
-    next_release = {None: "0.31.0", "0.30.1": "0.30.2", "0.30.1rc1": "0.30.1rc2"}[release_tag]
+        (root / ".gitignore").write_text("vllm_gr/_version.py\n*.log\n")
+        node = _git_output(root, "rev-parse", "--short=12", "HEAD").strip()
+        _assert_version(version_source, f"{next_release}.dev0+g{node}.dirty.npu")
+        _git(root, "checkout", "--", ".gitignore")
+
     versions = []
     for step in (1, 2):
         _git(root, "commit", "--allow-empty", "-qm", f"Development commit {step}")
@@ -315,8 +337,17 @@ def package_source(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 
 @pytest.mark.parametrize(  # type: ignore[misc]
-    ("source_device", "device"),
-    [("cuda", "cuda"), ("npu", "npu"), ("cpu", "cpu"), ("cpu", "cuda"), ("cuda", "npu")],
+    ("source_device", "device", "development"),
+    [
+        ("cuda", "cuda", False),
+        ("npu", "npu", False),
+        ("cpu", "cpu", False),
+        ("cpu", "cuda", False),
+        ("cuda", "npu", False),
+        ("cuda", "npu", True),
+        ("npu", "npu", True),
+        ("cpu", "cuda", True),
+    ],
 )
 def test_sdist_wheel_metadata(
     tmp_path: Path,
@@ -324,8 +355,14 @@ def test_sdist_wheel_metadata(
     package_source: Path,
     source_device: str,
     device: str,
+    development: bool,
 ) -> None:
     source = package_source
+    source_version = FIXTURE_RELEASE
+    if development:
+        _git(source, "commit", "--allow-empty", "-qm", "Target the next minor release")
+        node = _git_output(source, "rev-parse", "--short=12", "HEAD").strip()
+        source_version = f"0.31.0.dev1+g{node}"
     monkeypatch.setenv("VLLM_GR_TARGET_DEVICE", source_device)
 
     def build(root: Path, kind: str) -> None:
@@ -349,7 +386,9 @@ def test_sdist_wheel_metadata(
     extracted = next(unpacked.iterdir())
     assert (extracted / "requirements" / f"{device}.txt").is_file()
     monkeypatch.setenv("VLLM_GR_TARGET_DEVICE", device)
-    expected = FIXTURE_RELEASE + ("" if source_device == "cuda" else f"+{source_device}")
+    expected = source_version
+    if source_device != "cuda":
+        expected += ("." if "+" in expected else "+") + source_device
     # Resolve by name/version from an sdist, so pip checks filename vs prepared
     # metadata before building. Direct backend calls miss this contract.
     wheel_dir = tmp_path / "wheels"

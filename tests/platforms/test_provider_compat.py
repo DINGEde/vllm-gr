@@ -221,6 +221,47 @@ def test_unparsable_declared_range_is_a_provider_defect(
         compat.check_declared_ranges(RangedProvider(vllm_version_range="not a specifier"))
 
 
+@pytest.mark.l1  # type: ignore[misc]
+@pytest.mark.parametrize("backend", ["cuda", "ascend"])  # type: ignore[misc]
+@pytest.mark.parametrize(  # type: ignore[misc]
+    ("gr_version", "accepted"),
+    [
+        ("0.31.0.dev0", True),
+        ("0.31.0.dev7+g123.dirty.npu", True),
+        ("0.31.0rc1", True),
+        ("0.31.0", True),
+        ("0.31.1.dev1+g123", True),
+        ("0.31.1", True),
+        ("0.30.1.dev5+g123", False),
+        ("0.30.99", False),
+        ("0.32.0.dev0", False),
+        ("0.32.0", False),
+    ],
+)
+def test_builtin_providers_enforce_the_gr_release_line(
+    monkeypatch: pytest.MonkeyPatch, backend: str, gr_version: str, accepted: bool
+) -> None:
+    from vllm_gr.platforms.ascend import NPU_BACKEND
+    from vllm_gr.platforms.cuda import CUDA_BACKEND
+
+    provider = CUDA_BACKEND if backend == "cuda" else NPU_BACKEND
+    versions = {
+        "vllm-gr": gr_version,
+        "vllm": compat.SUPPORTED_VLLM_VERSION,
+        "vllm-ascend": compat.SUPPORTED_VLLM_ASCEND_VERSION,
+    }
+    monkeypatch.setattr(compat, "installed_version", versions.__getitem__)
+    monkeypatch.setenv(compat._STRICT_ENV, "1")
+    if accepted:
+        assert compat.check_declared_ranges(provider) == ()
+        compat.enforce_declared_ranges(provider)
+    else:
+        failures = compat.check_declared_ranges(provider)
+        assert len(failures) == 1 and failures[0].startswith("vllm-gr version ")
+        with pytest.raises(InvalidBackendProviderError, match="vllm-gr version"):
+            compat.enforce_declared_ranges(provider)
+
+
 def test_builtin_providers_declare_the_supported_runtime_pair() -> None:
     from vllm_gr.platforms.ascend import NPU_BACKEND
     from vllm_gr.platforms.cuda import CUDA_BACKEND

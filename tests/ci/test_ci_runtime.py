@@ -167,6 +167,50 @@ class TestRuntimeResolution(unittest.TestCase):
             runtime.check_versions({"vllm-gr": expected_dev}, {"vllm-gr": "0.30.2.dev0+g000.npu"})
         )
 
+    @pytest.mark.l1  # type: ignore[misc]
+    def test_upgrade_development_version_resolves_without_build_dependencies(self) -> None:
+        shutil.copyfile(ROOT / "setup.py", self.repo / "setup.py")
+        for name in (
+            "pyproject.toml",
+            "vllm_gr/_env_check.py",
+            "requirements/cuda.txt",
+        ):
+            path = self.repo / name
+            path.write_text(path.read_text().replace("0.29.0", "0.31.0"))
+        for args in [
+            ["init", "-q"],
+            ["config", "user.name", "Runtime Test"],
+            ["config", "user.email", "runtime@example.invalid"],
+            ["add", "."],
+            ["commit", "-qm", "Prior release"],
+            ["tag", "v0.30.0"],
+            ["commit", "--allow-empty", "-qm", "Upgrade candidate"],
+        ]:
+            subprocess.run(["git", "-C", str(self.repo), *args], check=True, capture_output=True)
+        node = subprocess.check_output(
+            ["git", "-C", str(self.repo), "rev-parse", "--short=12", "HEAD"], text=True
+        ).strip()
+        expected = {"vllm": "0.31.0", "vllm-gr": f"0.31.0.dev1+g{node}"}
+        self.assertEqual(runtime.resolve(self.repo, "cuda")["expected"], expected)
+        output = self.repo / "upgrade-spec.json"
+        subprocess.run(
+            [
+                sys.executable,
+                "-S",
+                str(ROOT / "tools/ci/resolve_runtime.py"),
+                "resolve",
+                "--repo",
+                str(self.repo),
+                "--device",
+                "cuda",
+                "--output",
+                str(output),
+            ],
+            check=True,
+            capture_output=True,
+        )
+        self.assertEqual(json.loads(output.read_text())["expected"], expected)
+
     def test_future_candidate_drives_runtime_without_ci_pin_changes(self) -> None:
         for name in (
             "setup.py",
